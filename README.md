@@ -1,72 +1,59 @@
 # PHP static type checker
 
 This is a fast and simple static code analyzer for PHP. It depends on the `php-ast` PECL extension.
+It resolves included files automatically and uses reflection to support any PECL extensions without
+requiring stubs.
 
 ## How to install and use
 
-I recommend to use a folder structure with the following resources for any sizable software
-project:
-
-`./Makefile`, `./helpers/`, `./src/`, `./build/`.
-
-The Makefile should contain targets to install and run the static code analysis.
-
 ```
-./helpers/php_static_type_checker.php:
-	wget https://codeberg.org/Lerchensporn/php_static_type_checker/php_static_type_checker.php \
-	    -o "$@"
-	chmod +x "$@"
-
-.PHONY: check
-check:
-    ./helpers/php_static_type_checker.php <file with main entry point>
+wget https://codeberg.org/Lerchensporn/php_static_type_checker/raw/branch/master/php_static_type_checker.php
+chmod +x php_static_type_checker.php
+./php_static_type_checker.php
 ```
 
-This `check` target you can add as a dependency to your `build` target.
+## Design objectives
 
-A properly written application should generally have a `main` function as the single entrypoint.
-Execute it conditionally to allow the static code analyzer to load the code without executing it:
+- Released in a single PHP file with no dependencies besides `php-ast`.
 
-```
-if (!defined('STATIC_CODE_ANALYSIS')) {
-    exit(main($argv));
-}
-```
-
-## Design aspects
-
-The motivation to develop this tool was frustration with Psalm and PHPStan, which are incredibly
-slow, easily run out of memory, are cumbersome to configure, and are unable to load included files
-automatically. Static code analysis is supposed to increase developer efficiency, but with the
-mentioned tools I spend more time to configure and run them than they save me.
-
-Design objectives:
-
-- The key objective is developer efficiency, specifically to waste less time on testing and fixing typos.
-  Reducing the amount of defects that reach production is a side effect.
+- The key objective is developer efficiency, particularly to waste less time on fixing typos.
+  Reducing the amount of defects that reach production is a side effect. Performance and ease of
+  use are more important than finding as many errors as possible.
 
 - Not using a configuration file because the tool shall be simple to use.
 
-- Using a small amount of code to implement only the most valuable features. The type checker
-  is quite poweful already and additional features need a strong justification.
+- False positives are not desirable.
 
-- Released in a single, possibly amalgated file, because I don't like package managers.
+- The type checker is quite powerful already and additional features need a strong justification.
+  The objective is to avoid creating another bloated mess like the existing tools. I regard the
+  tool as “almost” feature-complete with the current feature set that fits in 2000 SLOC.
 
-- Fast performance.
+- This application omits non-essential features in favor of performance and maintainability. Out of
+  scope are:
+   - extensive support for PHPDoc comments,
+   - support for outdated PHP versions,
+   - suggestions where to add more type hints,
+   - detection of dead code and unused identifiers are of scope, since it creates no runtime
+     defects and may obstruct debugging,
+   - sophisticated analysis of control structures.
 
 ## How could PHP better support static code analysis?
 
-It could be more convenient if we could omit the `defined('STATIC_CODE_ANALYSIS')` check. But the
-obstacle is PHP's autoloading functionality. It requires to execute the code to get informed about
-the existing identifiers. I dislike the autoloading approach also because what is actually loads is
-intransparent and not explicit. A possible workaround would be to execute only files passed via a
-`--eval` command-line flag before checking the other files.
+Originally I had started with the approach to include the files to analyze, which means one had
+to wrap the main entry point of the application into a `if (defined('STATIC_CODE_ANALYSIS')) {…}` check.
+The tool can now read all information from the AST, which took considerable effort and is a
+duplication of what PHP does internally. One can think of possible approaches to improve this.
 
-A static code analyzer should be able to resolve paths of included files with ease. PHP's ability
-to include other files is powerful and dynamic, which makes it harder to analyze.
+One nasty aspect is PHP's autoloading functionality. It still requires to execute the
+`vendor/autoload.php` file using the `--eval` flag to get informed about the existing identifiers.
+I dislike the autoloading approach also because what is actually loaded is intransparent and not
+explicit.
 
 Static code analysis would be more powerful if we had an more descriptive array and list data
-types. Other static code analyzers rely on doc comments here, another workaround we be attributes.
+types. Other static code analyzers rely on doc comments here, another solution would be attributes.
+
+Intersection types have only rare and not important use cases but introduce a lot of complexity. I
+think it was a mistake to introduce this feature.
 
 Case insensitive identifiers in PHP are a big bummer. It would be nice to have this removed in
 future versions.
@@ -76,6 +63,10 @@ type hints with a single type, and nullable types, requiring lots of case distin
 with a single type could be stored as a list with one entry, making it a special case of union
 types. Instead, we have inconsistent interfaces with ReflectionNamedType and ReflectionUnionType.
 
-What I don't like is that a parameter type hint `function (string $parameter=null) {...}`
-is treated by PHP just like `function (?string $parameter=null) {...}`. This is surprising
-behavior. This magical transformation of the type hint only works for `null` default values.
+What I don't like is that a parameter type hint `function (string $parameter=null) {...}` is
+treated by PHP just like `function (?string $parameter=null) {...}`. This is surprising behavior.
+This magical transformation of the type hint only works for `null` default values and only for
+function arguments, not for properties.
+
+The `insteadof` operator is awkward. Something like `ignore trait2::method` would be clearer, more
+powerful, and stricter (requiring `trait2::method` to exist) than `trait1::method insteadof trait2` 
