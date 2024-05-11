@@ -262,6 +262,8 @@ function type_has_supertype(ASTContext $ctx, array $types, array $supertypes): b
                 $type_allows_null = $type->allowsNull();
                 $type = $type->getName();
             }
+            $type = strtolower($supertype);
+            $supertype = strtolower($supertype);
             if ($type === 'mixed' || $supertype === 'mixed') {
                 return true;
             }
@@ -382,7 +384,7 @@ function get_possible_types(ASTContext $ctx, mixed $node, bool $print_error=fals
     }
     if ($node->kind === \ast\AST_CALL) {
         if ($node->children['args']->kind === \ast\AST_CALLABLE_CONVERT) {
-            return ['callable'];
+            return ['Closure'];
         }
         if ($node->children['expr']->kind === \ast\AST_NAME) {
             $function = $node->children['expr']->children['name'];
@@ -482,7 +484,7 @@ function validate_arg_list(ASTContext $ctx, ?\ReflectionFunctionAbstract $functi
                         $parameter = $p;
                     }
                 }
-                if ($parameter === null) {
+                if ($parameter === null && !$function->isVariadic()) {
                     $ctx->error("Invalid argument name `$arg_name`", $arg);
                     continue;
                 }
@@ -1137,7 +1139,9 @@ class AST_ReflectionClass extends \ReflectionClass
                         {
                             continue;
                         }
-                        if (!array_key_exists($i, $p) || $ip[$i]->getType() !== $p[$i]->getType()) {
+                        if (!array_key_exists($i, $p) ||
+                            strval($ip[$i]->getType()) !== strval($p[$i]->getType()))
+                        {
                             $this->ctx->error("Method `{$method->getName()}` has different parameter types " .
                                 "compared to the definition in the interface", $this->node);
                         }
@@ -1471,8 +1475,12 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node, array $parents=[]):
             return $ctx;
         }
         $class = $ctx->get_class($types[0]);
+        if ($class == null) {
+            $ctx->error("Undefined class `{$types[0]}`", $node);
+            return $ctx;
+        }
         if ($class->isAbstract()) {
-            $ctx->error("Cannot instantiate abstract class `$class_name`", $node);
+            $ctx->error("Cannot instantiate abstract class `{$class->getName()}`", $node);
             return $ctx;
         }
         $constructor = $class->getConstructor();
@@ -1524,8 +1532,11 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node, array $parents=[]):
     }
     else if ($node->kind === \ast\AST_STATIC) {
         $var = $node->children['var']->children['name'];
-        $type = get_possible_types($ctx, $node->children['default']);
-        $ctx->defined_variables[$var] = new DefinedVariable($var, $type);
+
+        # We cannot easily make assumptions about the type of static variables
+        # because type changes may persist across different function calls
+
+        $ctx->defined_variables[$var] = new DefinedVariable($var, [null]);
     }
     else if ($node->kind === \ast\AST_VAR) {
         $var = $node->children['name'];
@@ -1609,7 +1620,10 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node, array $parents=[]):
                     continue;
                 }
                 $ctx2->add_defined_variable($var, [null]);
-                if ($use->flags !== \ast\flags\CLOSURE_USE_REF) {
+                if ($use->flags === \ast\flags\CLOSURE_USE_REF) {
+                    $ctx->add_defined_variable($var, [null]);
+                }
+                else {
                     $ctx->error("Undefined closure variable `$var`", $node);
                 }
             }
