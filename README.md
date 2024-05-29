@@ -24,12 +24,9 @@ chmod +x php_static_type_checker.php
 
 - False positives are not desirable.
 
-- The type checker is quite powerful already and additional features need a strong justification.
-  The objective is to avoid creating another bloated mess like the existing tools. I regard the
-  tool as “almost” feature-complete with the current feature set that fits in 2000 SLOC.
-
-- This application omits non-essential features in favor of performance and maintainability. Out of
-  scope are:
+- This application omits non-essential features in favor of performance and maintainability.
+  I regard the tool as “almost” feature-complete with the current feature set that fits in 2000 SLOC.
+  Out of scope are:
    - extensive support for PHPDoc comments,
    - support for outdated PHP versions,
    - suggestions where to add more type hints,
