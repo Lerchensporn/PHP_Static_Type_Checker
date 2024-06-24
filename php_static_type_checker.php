@@ -596,6 +596,9 @@ function get_possible_methods(ASTContext $ctx, \ast\Node $node): ?array
             return null;
         }
         foreach ($possible_type as $type_name) {
+            if (in_array($type_name, ['int', 'float', 'string', 'null', 'bool'])) {
+                continue;
+            }
             $class = $ctx->get_class($type_name);
             if ($class === null) {
                 return null;
