@@ -68,6 +68,7 @@ class ASTContext
 
     function get_class(string $name): ?\ReflectionClass
     {
+        $name = strtolower($name);
         if ($name === 'self') {
             return $this->class;
         }
@@ -87,16 +88,19 @@ class ASTContext
 
     function class_exists(string $name)
     {
+        $name = strtolower($name);
         return array_key_exists($name, $this->defined_classes) || class_exists($name);
     }
 
     function interface_exists(string $name)
     {
+        $name = strtolower($name);
         return in_array($name, $this->defined_interface_names) || interface_exists($name);
     }
 
     function function_exists(string $name)
     {
+        $name = strtolower($name);
         return array_key_exists($name, $this->defined_functions) || function_exists($name);
     }
 
@@ -294,6 +298,8 @@ function type_has_supertype(ASTContext $ctx, array $types, array $supertypes): b
             }
             if ($supertype === 'object' && $ctx->class_exists($type) ||
                 $type === 'object' && $ctx->class_exists($supertype) ||
+                $type == 'closure' && $supertype == 'callable' ||
+                $type == 'callable' && $supertype == 'closure' ||
                 $type === 'string' && $supertype === 'callable' ||
                 $type === 'null' && $supertype_allows_null ||
                 $type_allows_null && $supertype_allows_null ||
@@ -301,7 +307,7 @@ function type_has_supertype(ASTContext $ctx, array $types, array $supertypes): b
                 $type === $supertype ||
                 $ctx->class_exists($type) &&
                 in_array($supertype === 'string' ? \Stringable::class : $supertype,
-                    $ctx->get_class($type)->getInterfaceNames()))
+                    array_map(strtolower(...), $ctx->get_class($type)->getInterfaceNames())))
             {
                 return true;
             }
@@ -376,6 +382,9 @@ function get_possible_types(ASTContext $ctx, mixed $node, bool $print_error=fals
         return [get_primitive_type($ctx->get_constant($const))];
     }
     if ($node->kind === \ast\AST_METHOD_CALL || $node->kind === \ast\AST_STATIC_CALL) {
+        if ($node->children['args']->kind === \ast\AST_CALLABLE_CONVERT) {
+            return ['Closure'];
+        }
         $possible_methods = get_possible_methods($ctx, $node);
         if ($possible_methods === null || count($possible_methods) === 0) {
             return [null];
@@ -983,6 +992,7 @@ class AST_ReflectionClass extends \ReflectionClass
     private array $properties = [];
     private array $constants = [];
     private array $methods = [];
+    private array $methods_lowercase = [];
     private array $implements = [];
     private null|\ReflectionClass|AST_ReflectionClass $extends = null;
     private string $file_name;
@@ -1277,6 +1287,7 @@ class AST_ReflectionClass extends \ReflectionClass
             }
         }
         $this->methods = $this->methods + $trait_methods + $parent_methods + $interface_methods;
+        $this->methods_lowercase = array_change_key_case($this->methods);
         $this->constants = $this->constants + $interface_constants + $parent_constants;
         $this->properties = $this->properties + $parent_properties;
         if (!($this->node->flags & \ast\flags\MODIFIER_ABSTRACT)) {
@@ -1380,12 +1391,12 @@ class AST_ReflectionClass extends \ReflectionClass
 
     function hasMethod(string $name): bool
     {
-        return array_key_exists($name, $this->methods);
+        return array_key_exists(strtolower($name), $this->methods_lowercase);
     }
 
     function getMethod(string $name): \ReflectionMethod
     {
-        return $this->methods[$name] ?? throw new \Exception;
+        return $this->methods_lowercase[strtolower($name)] ?? throw new \Exception;
     }
 
     function getMethods(?int $filter=null): array
@@ -1750,7 +1761,7 @@ function traverse_classes_functions(ASTContext $ctx, \ast\Node $node): void
             $ctx->fill_use_aliases($child);
         }
         else if ($child->kind === \ast\AST_CLASS) {
-            $name = $ctx->namespace . $child->children['name'];
+            $name = strtolower($ctx->namespace . $child->children['name']);
             if (array_key_exists($name, $ctx->defined_classes)) {
                 $ctx->error("Redeclaration of class `$name`", $child);
                 $ctx->defined_classes[$name] = null;
