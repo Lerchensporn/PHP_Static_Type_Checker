@@ -1891,4 +1891,4 @@ function main(array $argv): int
     return $has_error ? 1 : 0;
 }
 
-main($argv);
+exit(main($argv));
