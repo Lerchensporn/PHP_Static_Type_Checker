@@ -262,7 +262,7 @@ function type_has_supertype(ASTContext $ctx, array $types, array $supertypes): b
                 $type_allows_null = $type->allowsNull();
                 $type = $type->getName();
             }
-            $type = strtolower($supertype);
+            $type = strtolower($type);
             $supertype = strtolower($supertype);
             if ($type === 'mixed' || $supertype === 'mixed') {
                 return true;
