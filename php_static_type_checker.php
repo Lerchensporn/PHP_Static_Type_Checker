@@ -33,8 +33,11 @@ class ASTContext
 
     function add_defined_variable(string $var, array $type_list)
     {
-        if (!array_key_exists($var, $this->defined_variables)) {
+        if (!array_key_exists($var, $this->defined_variables) || $type_list === [null]) {
             $this->defined_variables[$var] = new DefinedVariable($var, $type_list);
+            return;
+        }
+        if ($this->defined_variables[$var]->possible_types === [null]) {
             return;
         }
         $this->defined_variables[$var]->possible_types =
@@ -198,12 +201,9 @@ function type_to_string(array $types, bool $sort=false): string
             $type_list[] = $type;
         }
         else if ($type instanceof \ReflectionNamedType) {
+            $type_list[] = $type->getName();
             if ($type->allowsNull() && !in_array($type->getName(), ['null', 'mixed'])) {
-                $type_list[] = $type->getName();
                 $type_list[] = 'null';
-            }
-            else {
-                $type_list[] = $type->getName();
             }
         }
         else if ($type instanceof \ReflectionUnionType) {
@@ -777,7 +777,7 @@ class AST_ReflectionNamedType extends \ReflectionNamedType
 
     function __toString()
     {
-        return $this->type_name;
+        return ($this->allows_null ? '?' : '') . $this->type_name;
     }
 }
 
@@ -1599,14 +1599,40 @@ function find_defined_variables(ASTContext $ctx, \ast\Node $node, array $parents
 
 function validate_ast_node(ASTContext $ctx, \ast\Node $node, array $parents=[]): ?ASTContext
 {
-    if ($node->kind === \ast\AST_CLASS_CONST || $node->kind === \ast\AST_STATIC_PROP) {
+    if ($node->kind === \ast\AST_BINARY_OP && ($node->flags === \ast\flags\BINARY_IS_IDENTICAL ||
+        $node->flags === \ast\flags\BINARY_IS_NOT_IDENTICAL))
+    {
+        $left_types = get_possible_types($ctx, $node->children['left']);
+        if ($left_types === [null]) {
+            return $ctx;
+        }
+        $right_types = get_possible_types($ctx, $node->children['right']);
+        if ($right_types === [null]) {
+            return $ctx;
+        }
+        $left_types = explode('|', type_to_string($left_types));
+        $right_types = explode('|', type_to_string($right_types));
+        if (count(array_intersect($left_types, $right_types)) !== 0 ||
+            in_array('mixed', $left_types) || in_array('mixed', $right_types) ||
+            in_array('bool', $left_types) &&
+            (in_array('false', $right_types) || in_array('true', $right_types)) ||
+            in_array('bool', $right_types) &&
+            (in_array('false', $left_types) || in_array('true', $left_types)))
+        {
+            return $ctx;
+        }
+        $left_types = implode('|', $left_types);
+        $right_types = implode('|', $right_types);
+        $always_never = $node->flags === \ast\flags\BINARY_IS_IDENTICAL ? 'never' : 'always';
+        $ctx->error("Condition is $always_never fulfilled because of the type mismatch between " .
+            "`$left_types` and `$right_types`", $node);
+    }
+    else if ($node->kind === \ast\AST_CLASS_CONST || $node->kind === \ast\AST_STATIC_PROP) {
         get_possible_types($ctx, $node, true);
     }
     else if ($node->kind === \ast\AST_RETURN) {
-        if ($ctx->function === null) {
-            return $ctx;  # PHP supports top-level return
-        }
-        if ($ctx->function->isGenerator()) {
+        if ($ctx->function === null || $ctx->function->isGenerator()) {
+            # `function` can be null because PHP supports `return` in the global scope
             return $ctx;
         }
         $return_type_hint = $ctx->function->getReturnType();
