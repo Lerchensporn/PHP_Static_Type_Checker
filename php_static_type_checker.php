@@ -217,6 +217,7 @@ function type_to_string(array $types, bool $sort=false): string
             $type_list[] = implode('&', $it);
         }
     }
+    $type_list = array_unique($type_list);
     if ($sort) {
         sort($type_list);
     }
@@ -777,7 +778,8 @@ class AST_ReflectionNamedType extends \ReflectionNamedType
 
     function __toString()
     {
-        return ($this->allows_null ? '?' : '') . $this->type_name;
+        # This method is needed to support `array_unique`
+        return ($this->allows_null && $this->type_name !== 'null' ? '?' : '') . $this->type_name;
     }
 }
 
