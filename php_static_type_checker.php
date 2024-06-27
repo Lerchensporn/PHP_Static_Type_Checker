@@ -395,7 +395,7 @@ function get_possible_types(ASTContext $ctx, mixed $node, bool $print_error=fals
         }
         return [null];
     }
-    else if ($node->kind === \ast\AST_CONST) {
+    if ($node->kind === \ast\AST_CONST) {
         $const = $node->children['name']->children['name'];
         if ($const === 'null') {
             return ['null'];
@@ -602,14 +602,7 @@ function get_possible_methods(ASTContext $ctx, \ast\Node $node, bool $print_erro
     }
     if (array_key_exists('class', $node->children)) { # Static call
         if ($node->children['class']->kind === \ast\AST_NAME) { # Example: `Klasse::method()`
-            $class_name = $ctx->fq_class_name($node->children['class']);
-            if ($ctx->get_class($class_name) === null) {
-                if ($print_error) {
-                    $ctx->error("Undefined class `$class_name`", $node);
-                }
-                return null;
-            }
-            $possible_types = [$class_name];
+            $possible_types = [$ctx->fq_class_name($node->children['class'])];
         }
         else { # Example: `$variable::method()`
             $possible_types = get_possible_types($ctx, $node->children['class'], true);
@@ -640,7 +633,10 @@ function get_possible_methods(ASTContext $ctx, \ast\Node $node, bool $print_erro
                 continue;
             }
             $class = $ctx->get_class($type_name);
-            if ($class === null) { ## print error heere?
+            if ($class === null) {
+                if ($print_error) {
+                    $ctx->error("Undefined class `$type_name`", $node);
+                }
                 return null;
             }
             if ($class->hasMethod($node->children['method'])) {
