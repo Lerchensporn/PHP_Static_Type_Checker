@@ -1617,11 +1617,11 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node, array $parents=[]):
         $node->flags === \ast\flags\BINARY_IS_NOT_IDENTICAL))
     {
         $left_types = get_possible_types($ctx, $node->children['left']);
-        if ($left_types === [null]) {
+        if ($left_types === [null] || $left_types === []) {
             return $ctx;
         }
         $right_types = get_possible_types($ctx, $node->children['right']);
-        if ($right_types === [null]) {
+        if ($right_types === [null] || $right_types === []) {
             return $ctx;
         }
         $left_types = explode('|', type_to_string($left_types));
