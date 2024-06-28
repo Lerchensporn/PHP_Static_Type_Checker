@@ -3,7 +3,7 @@
 
 namespace StaticTypeChecker;
 
-const NON_CLASS_TYPES = ['int', 'float', 'string', 'null', 'bool', 'false', 'array', 'true', 'resource'];
+const NON_CLASS_TYPES = ['int', 'float', 'string', 'null', 'bool', 'false', 'true', 'array', 'resource'];
 
 class DefinedVariable
 {
@@ -82,7 +82,7 @@ class ASTContext
 
     function get_class(string $name): ?\ReflectionClass
     {
-        # Beware that PHP's autoloading may not get triggered correctly if we would pass lowercased
+        # Beware that PHP's autoloading might not get triggered correctly if we passed lowercased
         # identifiers, even if they would normally be case-insensitive in PHP.
 
         $lower_name = strtolower($name);
