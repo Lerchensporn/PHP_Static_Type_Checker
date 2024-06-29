@@ -1438,7 +1438,25 @@ class AST_ReflectionClass extends \ReflectionClass
     }
 }
 
-function find_defined_variables(ASTContext $ctx, \ast\Node $node, array $parents=[]): void
+function add_variables_in_node(ASTContext $ctx, \ast\Node $node): void
+{
+    # This function is called on the `value` argument in foreach functions and on
+    # arrays that are assigned a value (e.g. `[$a, $b] = [1, 2]`).
+
+    foreach ([$node, ...$node->children] as $child) {
+        if (!($child instanceof \ast\Node)) {
+            continue;
+        }
+        if ($child->kind === \ast\AST_VAR && !($child->children['name'] instanceof \ast\Node)) {
+            $ctx->add_defined_variable($child->children['name'], [null]);
+        }
+        if ($child !== $node) {
+            add_variables_in_node($ctx, $child);
+        }
+    }
+}
+
+function find_defined_variables(ASTContext $ctx, \ast\Node $node): void
 {
     # Variables may be defined or have their type changed below their first usage. Therefore
     # we have to determine all defined variables of the scope before starting to run type checks.
@@ -1472,6 +1490,10 @@ function find_defined_variables(ASTContext $ctx, \ast\Node $node, array $parents
         $ctx->add_defined_variable($var, $possible_types);
     }
     else if ($node->kind === \ast\AST_ASSIGN || $node->kind === \ast\AST_ASSIGN_OP) {
+        if ($node->children['var']->kind === \ast\AST_ARRAY) {
+            add_variables_in_node($ctx, $node->children['var']);
+            goto end;
+        }
         $expr_types = get_possible_types($ctx, $node->children['expr']);
         if ($node->children['var']->kind === \ast\AST_VAR &&
             is_string($node->children['var']->children['name']))
@@ -1503,35 +1525,11 @@ function find_defined_variables(ASTContext $ctx, \ast\Node $node, array $parents
         }
         return; # Not visiting the closure statements
     }
-    else if ($node->kind === \ast\AST_VAR) {
-        $var = $node->children['name'];
-        if ($var instanceof \ast\Node) {
-            goto end;
+    else if ($node->kind === \ast\AST_FOREACH) {
+        if ($node->children['key'] !== null) {
+            $ctx->add_defined_variable($node->children['key']->children['name'], [null]);
         }
-        if ($parents[count($parents) - 1]->kind === \ast\AST_REF &&
-            $parents[count($parents) - 2]->kind === \ast\AST_FOREACH)
-        {
-            $ctx->defined_variables[$var] = new DefinedVariable($var, [null]);
-            goto end;
-        }
-        for ($i = count($parents) - 1; $i >= 0; --$i) {
-            if ($parents[$i]->kind !== \ast\AST_ARRAY_ELEM) {
-                break;
-            }
-            $i -= 1;
-            if ($parents[$i]->kind !== \ast\AST_ARRAY) {
-                break;
-            }
-        }
-        if ($parents[$i]->kind === \ast\AST_FOREACH &&
-            (!array_key_exists($i + 1, $parents) || $parents[$i + 1] === $parents[$i]->children['value'])
-            ||
-            $parents[$i]->kind === \ast\AST_ASSIGN &&
-            $parents[count($parents) - 1]->kind === \ast\AST_ARRAY_ELEM &&
-            $parents[$i + 1] === $parents[$i]->children['var'])
-        {
-            $ctx->defined_variables[$var] = new DefinedVariable($var, [null]);
-        }
+        add_variables_in_node($ctx, $node->children['value']);
     }
     else if (in_array($node->kind, [\ast\AST_CALL, \ast\AST_METHOD_CALL, \ast\AST_STATIC_CALL])) {
         if ($node->children['args'] === \ast\AST_CALLABLE_CONVERT) {
@@ -1601,17 +1599,16 @@ function find_defined_variables(ASTContext $ctx, \ast\Node $node, array $parents
     }
 
     end:
-    $parents[] = $node;
     foreach ($node->children as $key => $child) {
         if ($child instanceof \ast\Node &&
             !in_array($child->kind, [\ast\AST_CLASS, \ast\AST_FUNC_DECL]))
         {
-            find_defined_variables($ctx, $child, $parents);
+            find_defined_variables($ctx, $child);
         }
     }
 }
 
-function validate_ast_node(ASTContext $ctx, \ast\Node $node, array $parents=[]): ?ASTContext
+function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
 {
     if ($node->kind === \ast\AST_BINARY_OP && ($node->flags === \ast\flags\BINARY_IS_IDENTICAL ||
         $node->flags === \ast\flags\BINARY_IS_NOT_IDENTICAL))
@@ -1770,33 +1767,7 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node, array $parents=[]):
     }
     else if ($node->kind === \ast\AST_VAR) {
         $var = $node->children['name'];
-        if ($var instanceof \ast\Node) {
-            return $ctx;
-        }
-        if ($parents[count($parents) - 1]->kind === \ast\AST_REF &&
-            $parents[count($parents) - 2]->kind === \ast\AST_FOREACH)
-        {
-            return $ctx;
-        }
-        for ($i = count($parents) - 1; $i >= 0; --$i) {
-            if ($parents[$i]->kind !== \ast\AST_ARRAY_ELEM) {
-                break;
-            }
-            $i -= 1;
-            if ($parents[$i]->kind !== \ast\AST_ARRAY) {
-                break;
-            }
-        }
-        if ($parents[$i]->kind === \ast\AST_FOREACH &&
-            (!array_key_exists($i + 1, $parents) || $parents[$i + 1] === $parents[$i]->children['value'])
-            ||
-            $parents[$i]->kind === \ast\AST_ASSIGN &&
-            $parents[count($parents) - 1]->kind === \ast\AST_ARRAY_ELEM &&
-            $parents[$i + 1] === $parents[$i]->children['var'])
-        {
-            return $ctx;
-        }
-        if (!array_key_exists($var, $ctx->defined_variables)) {
+        if (!($var instanceof \ast\Node) && !array_key_exists($var, $ctx->defined_variables)) {
             $ctx->error("Undefined variable `$$var`", $node);
         }
     }
@@ -1888,16 +1859,16 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node, array $parents=[]):
     return $ctx;
 }
 
-function validate_ast_children(ASTContext $ctx, \ast\Node $node, array $parents=[]): void
+function validate_ast_children(ASTContext $ctx, \ast\Node $node): void
 {
-    $parents[] = $node;
     foreach ($node->children as $key => $child) {
-        if ($child instanceof \ast\Node) {
-            $child_ctx = validate_ast_node($ctx, $child, $parents);
-            if ($child_ctx !== null) {
-                validate_ast_children($child_ctx, $child, $parents);
-                $ctx->has_error = $ctx->has_error || $child_ctx->has_error;
-            }
+        if (!($child instanceof \ast\Node)) {
+            continue;
+        }
+        $child_ctx = validate_ast_node($ctx, $child);
+        if ($child_ctx !== null) {
+            validate_ast_children($child_ctx, $child);
+            $ctx->has_error = $ctx->has_error || $child_ctx->has_error;
         }
     }
 }
