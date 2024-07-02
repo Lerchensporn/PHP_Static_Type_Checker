@@ -453,11 +453,11 @@ function get_possible_types(ASTContext $ctx, mixed $node, bool $print_error=fals
             return [null];
         }
         $possible_expr_types = get_possible_types($ctx, $node->children['expr']);
+        if (count($possible_expr_types) === 0 || $possible_expr_types === [null]) {
+            return [null];
+        }
         $possible_types = [];
         foreach ($possible_expr_types as $possible_expr_type) {
-            if ($possible_expr_type === null) {
-                return [null];
-            }
             if ($possible_expr_type instanceof \ReflectionUnionType) {
                 $possible_expr_type = array_map(fn ($t) => $t->getName(), $possible_expr_type->getTypes());
             }
@@ -487,9 +487,9 @@ function get_possible_types(ASTContext $ctx, mixed $node, bool $print_error=fals
             }
         }
         if (count($possible_types) === 0) {
-            $possible_types_str = type_to_string($possible_expr_types);
+            $possible_expr_types_str = type_to_string($possible_expr_types);
             if ($print_error) {
-                $ctx->error("Variable of type `$possible_types_str` does not have property " .
+                $ctx->error("Variable of type `$possible_expr_types_str` does not have property " .
                     "`{$node->children['prop']}`", $node);
             }
             return [null];
