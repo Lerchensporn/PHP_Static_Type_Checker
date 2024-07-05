@@ -1229,7 +1229,7 @@ class AST_ReflectionClass extends \ReflectionClass
                 $name = $stmt->children['name'];
                 $value = $stmt->children['expr'];
                 if ($backing_type === null && $value !== null) {
-                    $this->ctx->error("Case `$name` of a non-backed must not have a value", $stmt);
+                    $this->ctx->error("Case `$name` of a non-backed enum must not have a value", $stmt);
                 }
                 else if ($backing_type !== null && $value === null) {
                     $this->ctx->error("Case `$name` of a backed enum must have a value", $stmt);
