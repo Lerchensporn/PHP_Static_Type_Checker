@@ -1879,10 +1879,10 @@ function get_string_constant_value(ASTContext $ctx, \ast\Node|string $node): ?st
         return $node;
     }
     if ($node->kind === \ast\AST_MAGIC_CONST) {
-        if ($node->flags === 344) {  # TODO: What is the constant? MAGIC_FILE is incorrect
+        if ($node->flags === \ast\flags\MAGIC_FILE) {
             return $ctx->file_name;
         }
-        else if ($node->flags === 345) {
+        else if ($node->flags === \ast\flags\MAGIC_DIR) {
             return dirname($ctx->file_name);
         }
     }
