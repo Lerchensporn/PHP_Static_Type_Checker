@@ -501,7 +501,7 @@ function get_possible_types(ASTContext $ctx, mixed $node, bool $print_error=fals
     return [null];
 }
 
-function validate_arg_list(ASTContext $ctx, ?\ReflectionFunctionAbstract $function, \ast\Node $node): void
+function validate_arguments(ASTContext $ctx, ?\ReflectionFunctionAbstract $function, \ast\Node $node): void
 {
     if ($node->kind === \ast\AST_CALLABLE_CONVERT) {
         return;
@@ -544,27 +544,13 @@ function validate_arg_list(ASTContext $ctx, ?\ReflectionFunctionAbstract $functi
                 $parameter = $function->getParameters()[$index];
             }
         }
-        if ($arg instanceof \ast\Node && $arg->kind === \ast\AST_VAR) {
-            if ($arg->children['name'] instanceof \ast\Node) {
-                continue;
-            }
-            if ($function === null) {
-                $ctx->add_defined_variable($arg->children['name'], [null]);
-                continue;
-            }
-            if ($parameter !== null && $parameter->isPassedByReference()) {
-                $ctx->add_defined_variable($arg->children['name'], [$parameter->getType()]);
-            }
-            if (!array_key_exists($arg->children['name'], $ctx->defined_variables)) {
-                continue;
-            }
-            $arg_types = $ctx->defined_variables[$arg->children['name']]->possible_types;
-            if ($arg_types === ['mixed']) {
-                continue;
-            }
-        }
-        else if ($arg instanceof \ast\Node) {
-            $arg_types = get_possible_types($ctx, $arg);
+        if ($parameter?->isPassedByReference() &&
+            (!($arg instanceof \ast\Node) || $arg->kind !== \ast\AST_VAR && $arg->kind !== \ast\AST_PROP))
+        {
+            $index += 1;
+            $ctx->error("In the call to `{$function->getName()}`, the expression in argument $index " .
+                "cannot be passed by reference", $node);
+            return;
         }
         if ($parameter === null) {
             continue;
@@ -573,9 +559,7 @@ function validate_arg_list(ASTContext $ctx, ?\ReflectionFunctionAbstract $functi
         if ($parameter_type === null) {
             continue;
         }
-        if (!($arg instanceof \ast\Node)) {
-            $arg_types = [get_primitive_type($arg)];
-        }
+        $arg_types = get_possible_types($ctx, $arg);
         if (!type_has_supertype($ctx, $arg_types, [$parameter_type])) {
             $arg_types_str = type_to_string($arg_types);
             $parameter_types_str = type_to_string([$parameter_type]);
@@ -1700,7 +1684,7 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
             $ctx->error("Undefined method `{$node->children['method']}`", $node);
         }
         if ($possible_methods === null || count($possible_methods) !== 1) {
-            validate_arg_list($ctx, null, $node->children['args']);
+            validate_arguments($ctx, null, $node->children['args']);
             return $ctx;
         }
         if ($node->kind === \ast\AST_STATIC_CALL) {
@@ -1716,12 +1700,12 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
                 $ctx->error("Method `{$possible_methods[0]->getName()}` is not static", $node);
             }
         }
-        validate_arg_list($ctx, $possible_methods[0], $node->children['args']);
+        validate_arguments($ctx, $possible_methods[0], $node->children['args']);
     }
     else if ($node->kind === \ast\AST_NEW) {
         $types = get_possible_types($ctx, $node, true);
         if (count($types) > 1 || $types[0] === null) {
-            validate_arg_list($ctx, null, $node->children['args']);
+            validate_arguments($ctx, null, $node->children['args']);
             return $ctx;
         }
         $class = $ctx->get_class($types[0]);
@@ -1738,7 +1722,7 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
             $ctx->error("The constructor of class `{$class->getName()}` does not accept arguments", $node);
             return $ctx;
         }
-        validate_arg_list($ctx, $constructor, $node->children['args']);
+        validate_arguments($ctx, $constructor, $node->children['args']);
     }
     else if ($node->kind === \ast\AST_CONST) {
 
@@ -1768,7 +1752,7 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
                 $ctx->error("Undefined function `$function_name`", $node);
             }
         }
-        validate_arg_list($ctx, $function, $node->children['args']);
+        validate_arguments($ctx, $function, $node->children['args']);
     }
     else if ($node->kind === \ast\AST_VAR) {
         $var = $node->children['name'];
