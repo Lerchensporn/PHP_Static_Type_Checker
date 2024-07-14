@@ -442,7 +442,9 @@ function get_possible_types(ASTContext $ctx, mixed $node, bool $print_error=fals
         return [$ctx->fq_class_name($node->children['class'], $print_error)];
     }
     if ($node->kind === \ast\AST_VAR) {
-        $var = $node->children['name'];
+        if ($node->children['name'] instanceof \ast\Node) {
+            return [null];
+        }
         if (!array_key_exists($node->children['name'], $ctx->defined_variables)) {
             return [];
         }
@@ -1489,7 +1491,7 @@ function find_defined_variables(ASTContext $ctx, \ast\Node $node): void
         $var = $node->children['var']->children['name'];
         $ctx->add_defined_variable($var, $possible_types);
     }
-    else if ($node->kind === \ast\AST_ASSIGN || $node->kind === \ast\AST_ASSIGN_OP) {
+    else if ($node->kind === \ast\AST_ASSIGN) {
         if ($node->children['var']->kind === \ast\AST_ARRAY) {
             add_variables_in_node($ctx, $node->children['var']);
             goto end;
@@ -1665,8 +1667,11 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
         }
     }
     else if ($node->kind === \ast\AST_ASSIGN || $node->kind === \ast\AST_ASSIGN_OP) {
-        $expr_types = get_possible_types($ctx, $node->children['expr']);
         $possible_types = get_possible_types($ctx, $node->children['var']);
+        if ($possible_types === []) {
+            return $ctx;
+        }
+        $expr_types = get_possible_types($ctx, $node->children['expr']);
         if (!type_has_supertype($ctx, $expr_types, $possible_types)) {
             $possible_types_str = type_to_string($possible_types);
             $expr_types_str = type_to_string($expr_types);
