@@ -1845,16 +1845,16 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
                 "return statement", $node
             );
         }
+        $ctx->has_error = $ctx->has_error || $ctx2->has_error;
         return null;
     }
     else if ($node->kind === \ast\AST_ARROW_FUNC) {
-        $ctx2 = clone $ctx;
-        $ctx2->function = new AST_ReflectionClosure($ctx2, $node);
-        $ctx2->function->initialize();
-        foreach ($ctx2->function->getParameters() as $p) {
-            $ctx2->add_defined_variable($p->getName(), [$p->getType()]);
+        $ctx = clone $ctx;
+        $ctx->function = new AST_ReflectionClosure($ctx, $node);
+        $ctx->function->initialize();
+        foreach ($ctx->function->getParameters() as $p) {
+            $ctx->add_defined_variable($p->getName(), [$p->getType()]);
         }
-        return $ctx2;
     }
     return $ctx;
 }
@@ -1969,6 +1969,7 @@ function load_source_file(ASTContext $ctx, string $file_name): void
         $file_name = $ctx->get_relative_file_name();
         $message = ucfirst($e->getMessage());
         print("$file_name line \e[1m{$e->getLine()}\e[0m:\n$message\n");
+        $ctx->has_error = true;
         return;
     }
     $ctx->included_files[$ctx->file_name] = $node;
@@ -2036,7 +2037,6 @@ function main(array $argv): int
 
     $sloc_count = 0;
     $make_self_check = in_array(__FILE__, array_map(realpath(...), array_slice($argv, 1)));
-    $has_error = false;
     $checked_files = [];
     $ignored_files = [];
     foreach ($ctx->included_files as $file_name => $node) {
@@ -2065,7 +2065,6 @@ function main(array $argv): int
         $ctx->namespace = '';
         find_defined_variables($ctx, $node);
         validate_ast_children($ctx, $node);
-        $has_error |= $ctx->has_error;
     }
     if ($print_statistics) {
         $checked_files = count($checked_files) === 0 ? ' (none)' : "\n" . implode("\n", $checked_files);
@@ -2075,7 +2074,7 @@ function main(array $argv): int
         print("Ignored files:$ignored_files\n");
     }
 
-    return $has_error ? 1 : 0;
+    return $ctx->has_error ? 1 : 0;
 }
 
 exit(main($argv));
