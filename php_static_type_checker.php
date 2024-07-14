@@ -2022,6 +2022,9 @@ function main(array $argv): int
         }
         load_source_file($ctx, $argv[$i]);
     }
+    if ($ctx->has_error) { # Omitting further validation in case of syntax errors
+        return 1;
+    }
 
     # Resolving type hints, traits, parent class/interfaces is only possible after having loaded all classes
 
