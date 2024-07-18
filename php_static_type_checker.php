@@ -1913,7 +1913,7 @@ function traverse_classes_functions(ASTContext $ctx, \ast\Node $node): void
         }
         else if ($child->kind === \ast\AST_CONST_DECL) {
             foreach ($child->children as $const) {
-                $name = $const->children['name'];
+                $name = $ctx->namespace . $const->children['name'];
                 $ctx->defined_constants[$name] = $const->children['value'];
             }
         }
