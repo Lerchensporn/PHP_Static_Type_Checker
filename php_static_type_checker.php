@@ -544,8 +544,8 @@ function validate_arguments(ASTContext $ctx, ?\ReflectionFunctionAbstract $funct
                 $parameter = $function->getParameters()[$index];
             }
         }
-        if ($parameter?->isPassedByReference() &&
-            (!($arg instanceof \ast\Node) || $arg->kind !== \ast\AST_VAR && $arg->kind !== \ast\AST_PROP))
+        if ($parameter?->isPassedByReference() && (!($arg instanceof \ast\Node) ||
+            !in_array($arg->kind, [\ast\AST_VAR, \ast\AST_PROP, \ast\AST_DIM])))
         {
             $index += 1;
             $ctx->error("In the call to `{$function->getName()}`, the expression in argument $index " .
