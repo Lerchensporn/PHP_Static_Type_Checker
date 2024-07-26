@@ -609,12 +609,12 @@ function get_possible_methods(ASTContext $ctx, \ast\Node $node, bool $print_erro
             $possible_types = [$ctx->fq_class_name($node->children['class'])];
         }
         else { # Example: `$variable::method()`
-            $possible_types = get_possible_types($ctx, $node->children['class'], true);
+            $possible_types = get_possible_types($ctx, $node->children['class']);
         }
     }
     else { # Non-static call. Example: `$this->method()`
         $is_static_call = false;
-        $possible_types = get_possible_types($ctx, $node->children['expr'], true);
+        $possible_types = get_possible_types($ctx, $node->children['expr']);
     }
     if ($possible_types === []) {
         return null;
