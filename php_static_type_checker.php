@@ -27,6 +27,7 @@ class ASTContext
     public string $file_name;
     public array $global_scope_variables;
     public array $use_aliases = [];
+    public bool $is_in_assignment = false;
 
     function __construct()
     {
@@ -346,7 +347,8 @@ function type_has_supertype(ASTContext $ctx, array $types, array $supertypes): b
     return false;
 }
 
-function get_possible_types(ASTContext $ctx, mixed $node, bool $print_error=false): array
+function get_possible_types(ASTContext $ctx, mixed $node, bool $print_error=false,
+    bool $is_in_assignment=false): array
 {
     # Return value `[null]` means we don't know the type, `[]` means the type is invalid.
     # But sometimes we return `[null]` for invalid types to avoid duplicate error messages.
@@ -354,6 +356,9 @@ function get_possible_types(ASTContext $ctx, mixed $node, bool $print_error=fals
     assert($node !== null);
     if (!($node instanceof \ast\Node)) {
         return [get_primitive_type($node)];
+    }
+    if ($node->kind === \ast\AST_ARRAY) {
+        return ['array'];
     }
     if ($node->kind === \ast\AST_CLASS_CONST || $node->kind === \ast\AST_STATIC_PROP) {
         if ($node->kind === \ast\AST_CLASS_CONST && !is_string($node->children['const']) ||
@@ -454,7 +459,7 @@ function get_possible_types(ASTContext $ctx, mixed $node, bool $print_error=fals
         if (!is_string($node->children['prop'])) {
             return [null];
         }
-        $possible_expr_types = get_possible_types($ctx, $node->children['expr']);
+        $possible_expr_types = get_possible_types($ctx, $node->children['expr'], $print_error);
         if (count($possible_expr_types) === 0 || $possible_expr_types === [null]) {
             return [null];
         }
@@ -480,6 +485,11 @@ function get_possible_types(ASTContext $ctx, mixed $node, bool $print_error=fals
                 if ($class === null) {
                     # Returning null to avoid error messages about properties when we already
                     # have one about the incorrect class name.
+                    return [null];
+                }
+                if (!$is_in_assignment && $class->hasMethod('__get') ||
+                    $is_in_assignment && $class->hasMethod('__set'))
+                {
                     return [null];
                 }
                 if (!$class->hasProperty($node->children['prop'])) {
@@ -594,6 +604,7 @@ function get_possible_methods(ASTContext $ctx, \ast\Node $node, bool $print_erro
         return null;
     }
     if (array_key_exists('class', $node->children)) { # Static call
+        $is_static_call = true;
         if ($node->children['class']->kind === \ast\AST_NAME) { # Example: `Klasse::method()`
             $possible_types = [$ctx->fq_class_name($node->children['class'])];
         }
@@ -602,6 +613,7 @@ function get_possible_methods(ASTContext $ctx, \ast\Node $node, bool $print_erro
         }
     }
     else { # Non-static call. Example: `$this->method()`
+        $is_static_call = false;
         $possible_types = get_possible_types($ctx, $node->children['expr'], true);
     }
     if ($possible_types === []) {
@@ -630,6 +642,11 @@ function get_possible_methods(ASTContext $ctx, \ast\Node $node, bool $print_erro
                 if ($print_error) {
                     $ctx->error("Undefined class `$type_name`", $node);
                 }
+                return null;
+            }
+            if ($is_static_call && $class->hasMethod('__callStatic') ||
+                !$is_static_call && $class->hasMethod('__call'))
+            {
                 return null;
             }
             if ($class->hasMethod($node->children['method'])) {
@@ -1429,19 +1446,24 @@ class AST_ReflectionClass extends \ReflectionClass
 
 function add_variables_in_node(ASTContext $ctx, \ast\Node $node): void
 {
-    # This function is called on the `value` argument in foreach functions and on
+    # This function is called on the `value` argument in `foreach` loops and on
     # arrays that are assigned a value (e.g. `[$a, $b] = [1, 2]`).
 
-    foreach ([$node, ...$node->children] as $child) {
-        if (!($child instanceof \ast\Node)) {
-            continue;
+    if ($node->kind === \ast\AST_ARRAY) {
+        foreach ($node->children as $child) {
+            if ($child->children['key'] instanceof \ast\Node) {
+                add_variables_in_node($ctx, $child->children['key']);
+            }
+            if ($child->children['value'] instanceof \ast\Node) {
+                add_variables_in_node($ctx, $child->children['value']);
+            }
         }
-        if ($child->kind === \ast\AST_VAR && !($child->children['name'] instanceof \ast\Node)) {
-            $ctx->add_defined_variable($child->children['name'], [null]);
-        }
-        if ($child !== $node) {
-            add_variables_in_node($ctx, $child);
-        }
+    }
+    else if ($node->kind === \ast\AST_REF) {
+        add_variables_in_node($ctx, $node->children['var']);
+    }
+    else if ($node->kind === \ast\AST_VAR && is_string($node->children['name'])) {
+        $ctx->add_defined_variable($node->children['name'], [null]);
     }
 }
 
@@ -1515,7 +1537,7 @@ function find_defined_variables(ASTContext $ctx, \ast\Node $node): void
         return; # Not visiting the closure statements
     }
     else if ($node->kind === \ast\AST_FOREACH) {
-        if ($node->children['key'] !== null) {
+        if (is_string($node->children['key']?->children['name'] ?? null)) {
             $ctx->add_defined_variable($node->children['key']->children['name'], [null]);
         }
         add_variables_in_node($ctx, $node->children['value']);
@@ -1597,6 +1619,24 @@ function find_defined_variables(ASTContext $ctx, \ast\Node $node): void
     }
 }
 
+function is_statement_writable(\ast\Node $node): bool
+{
+    if ($node->kind === \ast\AST_ARRAY) {
+        if (count($node->children) === 0) {
+            return false;
+        }
+        foreach ($node->children as $child) {
+            if (!($child->children['value'] instanceof \ast\Node) ||
+                !is_statement_writable($child->children['value']))
+            {
+                return false;
+            }
+        }
+    }
+    return in_array($node->kind, [\ast\AST_VAR, \ast\AST_ARRAY, \ast\AST_ARRAY_ELEM, \ast\AST_PROP,
+        \ast\AST_DIM, \ast\AST_REF, \ast\AST_STATIC_PROP]);
+}
+
 function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
 {
     if ($node->kind === \ast\AST_BINARY_OP && ($node->flags === \ast\flags\BINARY_IS_IDENTICAL ||
@@ -1627,9 +1667,6 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
         $ctx->error("Condition is $always_never fulfilled because of the type mismatch between " .
             "`$left_types` and `$right_types`", $node);
     }
-    else if ($node->kind === \ast\AST_CLASS_CONST || $node->kind === \ast\AST_STATIC_PROP) {
-        get_possible_types($ctx, $node, true);
-    }
     else if ($node->kind === \ast\AST_RETURN) {
         if ($ctx->function === null || $ctx->function->isGenerator()) {
             # `function` can be null because PHP supports `return` in the global scope
@@ -1653,18 +1690,47 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
                 "`$return_type_hint_str`", $node);
         }
     }
+    else if ($node->kind === \ast\AST_FOREACH) {
+        if (!is_statement_writable($node->children['value'])) {
+            $ctx->error("The value of the `foreach` loop is not writable", $node);
+            return null;
+        }
+        if ($node->children['key'] !== null) {
+            if (!is_statement_writable($node->children['key'])) {
+                $ctx->error("The key of the `foreach` loop is not writable", $node);
+                return null;
+            }
+            validate_ast_children($ctx, $node->children['key']);
+        }
+        $ctx->is_in_assignment = true;
+        validate_ast_children($ctx, $node->children['value']);
+        $ctx->is_in_assignment = false;
+        validate_ast_children($ctx, $node->children['stmts']);
+        return null;
+    }
     else if ($node->kind === \ast\AST_ASSIGN || $node->kind === \ast\AST_ASSIGN_OP) {
-        $possible_types = get_possible_types($ctx, $node->children['var']);
+        if (!is_statement_writable($node->children['var'])) {
+            $ctx->error("The left-hand site of the assignment is not writable", $node);
+            return null;
+        }
+        if ($node->children['expr'] instanceof \ast\Node) {
+            validate_ast_children($ctx, $node->children['expr']);
+        }
+        $ctx->is_in_assignment = true;
+        validate_ast_children($ctx, $node->children['var']);
+        $ctx->is_in_assignment = false;
+        $possible_types = get_possible_types($ctx, $node->children['var'], true, true);
         if ($possible_types === []) {
-            return $ctx;
+            return null;
         }
         $expr_types = get_possible_types($ctx, $node->children['expr']);
         if (!type_has_supertype($ctx, $expr_types, $possible_types)) {
             $possible_types_str = type_to_string($possible_types);
             $expr_types_str = type_to_string($expr_types);
-            $ctx->error("Cannot assign type `$expr_types_str` to property of type " .
+            $ctx->error("Cannot assign type `$expr_types_str` to variable of type " .
                 "`$possible_types_str`", $node);
         }
+        return null;
     }
     else if ($node->kind === \ast\AST_CATCH) {
         $possible_types = [];
@@ -1780,9 +1846,6 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
             return null;  # Skipping analysis of redefined class
         }
     }
-    else if ($node->kind === \ast\AST_PROP) {
-        get_possible_types($ctx, $node, print_error: true);
-    }
     else if (in_array($node->kind, [\ast\AST_FUNC_DECL, \ast\AST_METHOD, \ast\AST_CLOSURE])) {
         $ctx2 = clone $ctx;
         $ctx2->reset_defined_variables();
@@ -1853,16 +1916,25 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
 
 function validate_ast_children(ASTContext $ctx, \ast\Node $node): void
 {
-    foreach ($node->children as $key => $child) {
+    if (($child_ctx = validate_ast_node($ctx, $node)) === null) {
+        return;
+    }
+    $is_in_assignment = $child_ctx->is_in_assignment;
+    if (in_array($node->kind, [\ast\AST_PROP, \ast\AST_VAR, \ast\AST_DIM])) {
+        $child_ctx->is_in_assignment = false;
+    }
+    $prop_kinds = [\ast\AST_CLASS_CONST, \ast\AST_STATIC_PROP, \ast\AST_PROP];
+    foreach ($node->children as $child) {
         if (!($child instanceof \ast\Node)) {
             continue;
         }
-        $child_ctx = validate_ast_node($ctx, $child);
-        if ($child_ctx !== null) {
-            validate_ast_children($child_ctx, $child);
-            $ctx->has_error = $ctx->has_error || $child_ctx->has_error;
+        if (in_array($child->kind, $prop_kinds) && !in_array($node->kind, $prop_kinds)) {
+            get_possible_types($child_ctx, $child, true, $child_ctx->is_in_assignment);
         }
+        validate_ast_children($child_ctx, $child);
     }
+    $child_ctx->is_in_assignment = $is_in_assignment;
+    $ctx->has_error = $ctx->has_error || $child_ctx->has_error;
 }
 
 function get_string_constant_value(ASTContext $ctx, \ast\Node|string $node): ?string
