@@ -67,16 +67,10 @@ class ASTContext
         return array_key_exists($name, $this->defined_constants) || defined($name);
     }
 
-    function get_constant_type(string $name): string
+    function get_constant_type(string $name): ?string
     {
         if (defined($name)) {
             return get_primitive_type(constant($name));
-        }
-        if ($this->defined_constants[$name] instanceof \ast\Node) {
-            if ($this->defined_constants[$name]->kind === \ast\AST_ARRAY) {
-                return 'array';
-            }
-            throw new \Exception;
         }
         return get_primitive_type($this->defined_constants[$name]);
     }
@@ -243,9 +237,15 @@ function get_primitive_type(mixed $x): ?string
     if ($x === true) return 'true';
     if (is_int($x)) return 'int';
     if (is_float($x)) return 'float';
-    if (is_array($x)) return 'array'; # May come from `get_constant_type`
     if (is_string($x)) return 'string';
-    throw new \Exception('Unknown primitive type: ' . ($x ?? 'null'));
+    if (!($x instanceof \ast\Node)) {
+        throw new \Exception('Unknown primitive type: ' . ($x ?? 'null'));
+    }
+    if ($x->kind === \ast\AST_ARRAY) return 'array';
+    if ($x->kind === \ast\AST_CONST && $x->children['name']->children['name'] === 'null') return 'null';
+    if ($x->kind === \ast\AST_CONST && $x->children['name']->children['name'] === 'true') return 'true';
+    if ($x->kind === \ast\AST_CONST && $x->children['name']->children['name'] === 'false') return 'false';
+    return null;
 }
 
 function type_has_supertype(ASTContext $ctx, array $types, array $supertypes): bool
@@ -315,19 +315,18 @@ function type_has_supertype(ASTContext $ctx, array $types, array $supertypes): b
             if (($parent = $ctx->get_class($type)) !== null) {
                 $parents_interfaces = $parent->getInterfaceNames();
                 while (($parent = $parent->getParentClass()) !== false) {
-                    $parents_interfaces = [
-                        ...$parents_interfaces, $parent->getName(), ...$parent->getInterfaceNames()
-                    ];
+                    $parents_interfaces []= $parent->getName();
                 }
+                $parents_interfaces = array_map(strtolower(...), $parents_interfaces);
             }
             else {
                 $parents_interfaces = [];
             }
-            $parents_interfaces = array_map(strtolower(...), $parents_interfaces);
 
             if ($supertype === 'object' && $ctx->class_exists($type) ||
                 $type === 'object' && $ctx->class_exists($supertype) ||
                 $type === 'closure' && $supertype === 'callable' ||
+                $type === 'int' && $supertype === 'float' ||
                 $type === 'callable' && $supertype === 'closure' ||
                 $type === 'string' && $supertype === 'callable' ||
                 $type === 'bool' && in_array($supertype, ['false', 'true']) ||
@@ -845,15 +844,8 @@ class AST_ReflectionClassConstant extends \ReflectionClassConstant
 
 class AST_ReflectionParameter extends \ReflectionParameter
 {
-    private ?\ReflectionType $type;
-
-    function __construct(ASTContext $ctx, private \ast\Node $node)
-    {
-        $this->type = $ctx->reflection_type_from_ast($this->node->children['type']);
-        if (($this->node->flags & \ast\flags\PARAM_VARIADIC) && $this->node->children['default'] !== null) {
-            $ctx->error("A variadic parameter cannot have a default value", $node);
-        }
-    }
+    function __construct(private \ast\Node $node, private ?\ReflectionType $type)
+    {}
 
     function getName(): string
     {
@@ -932,12 +924,27 @@ trait AST_ReflectionFunctionAbstract
         $this->declaring_class = $this->ctx->class;
         for ($i = 0; $i < count($this->node->children['params']->children); ++$i) {
             $param = $this->node->children['params']->children[$i];
-            $this->parameters[] = new AST_ReflectionParameter($this->ctx, $param);
+            $type_hint = $this->ctx->reflection_type_from_ast($param->children['type']);
+            if (($param->flags & \ast\flags\PARAM_VARIADIC) && $param->children['default'] !== null) {
+                $this->ctx->error("A variadic parameter cannot have a default value", $param);
+            }
+            $this->parameters[] = new AST_ReflectionParameter($param, $type_hint);
             if (($param->flags & \ast\flags\PARAM_VARIADIC)) {
                 $this->is_variadic = true;
                 if ($i < count($this->node->children['params']->children) - 1) {
                     $this->ctx->error("Only the last parameter can be variadic", $this->node);
                 }
+            }
+            if ($param->children['default'] === null) {
+                continue;
+            }
+            $default_type = get_primitive_type($param->children['default']);
+            if (!type_has_supertype($this->ctx, [$default_type], [$type_hint])) {
+                $type_str = type_to_string([$type_hint]);
+                $this->ctx->error(
+                    "Mismatch between type hint `$type_str` and default value type `$default_type` " .
+                    "for parameter `{$param->children['name']}`", $param
+                );
             }
         }
         if ($this->node->children['returnType'] !== null) {
@@ -992,13 +999,39 @@ trait AST_ReflectionFunctionAbstract
     }
 }
 
-class AST_ReflectionClosure extends \ReflectionFunctionAbstract
+class AST_ReflectionFunction extends \ReflectionFunctionAbstract
 {
     use AST_ReflectionFunctionAbstract;
 
     function getDeclaringClass(): ?\ReflectionClass
     {
         return $this->declaring_class;
+    }
+}
+
+class MethodMadeNonAbstract extends \ReflectionMethod
+{
+    function __construct(private \ReflectionMethod $method)
+    {}
+
+    function isStatic(): bool
+    {
+        return $this->method->isStatic();
+    }
+
+    function getParameters(): array
+    {
+        return $this->method->getParameters();
+    }
+
+    function getModifiers(): int
+    {
+        return $this->method->getModifiers() & ~\ast\flags\MODIFIER_ABSTRACT;
+    }
+
+    function is_return_required(): bool
+    {
+        return false;
     }
 }
 
@@ -1018,20 +1051,16 @@ class AST_ReflectionMethod extends \ReflectionMethod
 
     function getModifiers(): int
     {
-        return $this->node->flags;
+        return $this->node->flags | $this->declaring_class->isInterface() * \ast\flags\MODIFIER_ABSTRACT;
     }
 }
-
-class AST_ReflectionFunction extends AST_ReflectionClosure
-{}
 
 class AST_ReflectionClass extends \ReflectionClass
 {
     private array $properties = [];
     private array $constants = [];
     private array $methods = [];
-    private array $methods_lowercase = [];
-    private array $implements = [];
+    private array $interface_names = [];
     private null|\ReflectionClass|AST_ReflectionClass $extends = null;
     private string $file_name;
     private string $namespace;
@@ -1045,6 +1074,165 @@ class AST_ReflectionClass extends \ReflectionClass
         $this->use_aliases = $ctx->use_aliases;
     }
 
+    private function process_class_stmt(\ast\Node $stmt, array $interface_methods,
+        null|false|\ReflectionType $backing_type, ?\ReflectionType $enum_type)
+    {
+        if ($stmt->kind === \ast\AST_PROP_GROUP) {
+            if ($this->node->flags & \ast\flags\CLASS_INTERFACE) {
+                $this->ctx->error("Interfaces may not include properties", $stmt);
+                return;
+            }
+            $type_hint = $this->ctx->reflection_type_from_ast($stmt->children['type']);
+            foreach ($stmt->children['props']->children as $prop) {
+                $name = $prop->children['name'];
+                if (array_key_exists($name, $this->properties)) {
+                    $this->ctx->error("Cannot redefine property `$name`", $stmt);
+                    return;
+                }
+                if (($prop->flags & \ast\flags\MODIFIER_READONLY) && $prop->children['default'] !== null) {
+                    $this->ctx->error("Readonly non-parameter property `$name` cannot have a default value",
+                        $prop);
+                }
+                if ($prop->flags & \ast\flags\MODIFIER_READONLY && $type_hint === null) {
+                    $this->ctx->error("Readonly property `$name` must have a type hint", $prop);
+                }
+                $default = $prop->children['default'];
+                $this->properties[$name] = new AST_ReflectionProperty($name, $default, $type_hint,
+                    $stmt->flags);
+                if ($default === null) {
+                    continue;
+                }
+                $default_type = get_primitive_type($default);
+                if (!type_has_supertype($this->ctx, [$default_type], [$type_hint])) {
+                    $type_str = type_to_string([$type_hint]);
+                    $this->ctx->error(
+                        "Mismatch between type hint `$type_str` and default value type `$default_type` " .
+                        "for property `$name`", $prop
+                    );
+                }
+            }
+        }
+        else if ($stmt->kind === \ast\AST_CLASS_CONST_GROUP) {
+            $type_hint = $this->ctx->reflection_type_from_ast($stmt->children['type']);
+            foreach ($stmt->children['const']->children as $const) {
+                $name = $const->children['name'];
+                if (array_key_exists($name, $this->constants)) {
+                    $this->ctx->error("Cannot redefine class constant `$name`", $stmt);
+                    return;
+                }
+                $value_type = get_primitive_type($const->children['value']);
+                $value_type = new AST_ReflectionNamedType($this->ctx, $value_type, false);
+                if (!type_has_supertype($this->ctx, [$value_type], [$type_hint])) {
+                    $type_str = type_to_string([$type_hint]);
+                    $this->ctx->error(
+                        "Mismatch between type hint `$type_str` and value type `$value_type` " .
+                        "for constant `$name`", $const
+                    );
+                }
+                $this->constants[$name] = new AST_ReflectionClassConstant(
+                    $name, $const->children['value'], $value_type, $stmt->flags);
+            }
+        }
+        else if ($stmt->kind === \ast\AST_METHOD) {
+            if ($this->node->flags & \ast\flags\CLASS_INTERFACE && $stmt->children['stmts'] !== null) {
+                $this->ctx->error("The interface method must not have a body", $stmt);
+            }
+            $name = strtolower($stmt->children['name']);
+            if ($this->extends?->getMethod($name)?->getModifiers() & \ast\flags\MODIFIER_FINAL) {
+                $this->ctx->error("Cannot redeclare final method `$name`", $this->node);
+                return;
+            }
+            if (array_key_exists($name, $this->methods)) {
+                $this->ctx->error("Cannot redeclare method `{$stmt->children['name']}`", $stmt);
+                return;
+            }
+            $method = new AST_ReflectionMethod($this->ctx, $stmt);
+            $method->initialize();
+            if (array_key_exists(strtolower($stmt->children['name']), $interface_methods)) {
+                $imethod = $interface_methods[strtolower($stmt->children['name'])];
+                if (($imethod->getModifiers() ^ $method->getModifiers()) & ~\ast\flags\MODIFIER_ABSTRACT) {
+                    $this->ctx->error("Method `{$method->getName()}` has different access modifiers " .
+                        "compared to the definition in the interface", $this->node);
+                }
+                $ip = $imethod->getParameters();
+                $p = $method->getParameters();
+                for ($i = 0; $i < count($ip); ++$i) {
+                    if (!array_key_exists($i, $p)) {
+                        $this->ctx->error("Method `{$method->getName()}` has fewer parameters " .
+                            "than the definition in the interface", $this->node);
+                        break;
+                    }
+                    if ($p[$i]->isVariadic()) {
+                        break;
+                    }
+                    if ($p[$i]->getType() === null || $p[$i]->getType() instanceof \ReflectionNamedType &&
+                        $p[$i]->getType()->getName() === 'mixed')
+                    {
+                        continue;
+                    }
+                    if (!array_key_exists($i, $p) ||
+                        strval($ip[$i]->getType()) !== strval($p[$i]->getType()))
+                    {
+                        $this->ctx->error("Method `{$method->getName()}` has different parameter types " .
+                            "compared to the definition in the interface", $this->node);
+                    }
+                }
+                if ($i < count($p) && !$p[$i]->isVariadic()) {
+                    $this->ctx->error("Method `{$method->getName()}` has more parameters " .
+                        "than the definition in the interface", $this->node);
+                }
+                if ($imethod->getReturnType() !== null) {
+                    $iret = type_to_string([$imethod->getReturnType()], true);
+                    $ret = type_to_string([$method->getReturnType()], true);
+                    if($iret !== $ret) {
+                    $this->ctx->error("Method `{$method->getName()}` has a different return type " .
+                        "compared to the definition in the interface", $this->node);
+                    }
+                }
+            }
+            $this->methods[$name] = $method;
+            if ($stmt->children['name'] !== '__construct') {
+                return;
+            }
+            foreach ($stmt->children['params']->children as $param) {
+                if (!($param->flags & \ast\flags\MODIFIER_PUBLIC) &&
+                    !($param->flags & \ast\flags\MODIFIER_PROTECTED) &&
+                    !($param->flags & \ast\flags\MODIFIER_PRIVATE))
+                {
+                    continue;
+                }
+                $name = $param->children['name'];
+                $type_hint = $this->ctx->reflection_type_from_ast($param->children['type']);
+                if ($param->flags & \ast\flags\MODIFIER_READONLY && $type_hint === null) {
+                    $this->ctx->error("Readonly property `$name` must have a type hint", $param);
+                }
+                $this->properties[$name] = new AST_ReflectionProperty($name, $param->children['default'],
+                    $type_hint, $param->flags);
+            }
+        }
+        else if ($stmt->kind === \ast\AST_ENUM_CASE) {
+            if (!($this->node->flags & \ast\flags\CLASS_ENUM)) {
+                $this->ctx->error('`case` can only be used in enums', $stmt);
+                return;
+            }
+            $name = $stmt->children['name'];
+            $value = $stmt->children['expr'];
+            if ($backing_type === false && $value !== null) {
+                $this->ctx->error("Case `$name` of a non-backed enum must not have a value", $stmt);
+            }
+            else if ($backing_type instanceof \ReflectionType && $value === null) {
+                $this->ctx->error("Case `$name` of a backed enum must have a value", $stmt);
+            }
+            else if ($backing_type instanceof \ReflectionType &&
+                ($backing_type?->getName() === 'string') !== is_string($value))
+            {
+                $this->ctx->error("Type of case `$name` does not match the enum's backing type", $stmt);
+            }
+            $this->constants[$name] = new AST_ReflectionClassConstant($name, null, $enum_type,
+                \ast\flags\MODIFIER_PUBLIC | \ast\flags\MODIFIER_READONLY);
+        }
+    }
+
     function initialize()
     {
         if ($this->is_initialized) {
@@ -1055,15 +1243,44 @@ class AST_ReflectionClass extends \ReflectionClass
         $this->ctx->file_name = $this->file_name;
         $this->ctx->namespace = $this->namespace;
         $this->ctx->use_aliases = $this->use_aliases;
-        $enum_type = null;
-        $backing_type = null;
-        if ($this->node->flags & \ast\flags\CLASS_ENUM) {
-            $enum_type = new AST_ReflectionNamedType($this->ctx, $this, false);
-            $backing_type = $this->node->children['type'];
+
+        ### Processing interfaces
+
+        $interface_methods = [];
+        $interface_constants = [];
+        $implements_lowercase = [];
+        foreach ($this->node->children['implements']?->children ?? [] as $interface) {
+            $interface_name = $this->ctx->fq_class_name($interface);
+            $class = $this->ctx->get_class($interface_name);
+            if ($class === null) {
+                $this->ctx->error("Undefined interface `$interface_name`", $interface);
+                continue;
+            }
+            if ($class instanceof AST_ReflectionClass) {
+                $class->initialize();
+            }
+
+            if (in_array(strtolower($interface_name), $implements_lowercase)) {
+                $this->ctx->error("Duplicate specification of interface `$interface_name`", $interface);
+            }
+            $implements_lowercase []= strtolower($interface_name);
+
+            $this->interface_names = [
+                ...$this->interface_names, $class->getName(), ...$class->getInterfaceNames()
+            ];
+            foreach ($class->getMethods() as $method) {
+                $interface_methods[strtolower($method->getName())] = $method;
+            }
+            foreach ($class->getReflectionConstants() as $constant) {
+                $interface_constants[$constant->getName()] = $constant;
+            }
         }
-        $parent_properties = [];
-        $parent_constants = [];
+
+        ### Processing the parent class
+
         $parent_methods = [];
+        $parent_constants = [];
+        $parent_properties = [];
         if ($this->node->children['extends'] !== null) {
             $class_name = $this->ctx->fq_class_name($this->node->children['extends']);
             if (!$this->ctx->class_exists($class_name)) {
@@ -1073,182 +1290,60 @@ class AST_ReflectionClass extends \ReflectionClass
             else {
                 $this->extends = $this->ctx->get_class($class_name);
                 if ($this->extends instanceof AST_ReflectionClass) {
-                    $this->extends->initialize();
+                    $this->extends->initialize(); # Must come before `process_class_stmts(…)`
                 }
+                $this->interface_names = [
+                    ...$this->interface_names, ...$this->extends->getInterfaceNames()
+                ];
                 if ($this->extends->isFinal()) {
                     $this->ctx->error("Cannot inherit from final class `{$this->extends->getName()}`",
                         $this->node);
                 }
+                foreach ($this->extends->getMethods() as $method) {
+                    $parent_methods[strtolower($method->getName())] = $method;
+                }
                 foreach ($this->extends->getProperties() as $property) {
-                    if (!array_key_exists($property->getName(), $this->properties)) {
-                        $parent_properties[$property->getName()] = $property;
-                    }
+                    $parent_properties[$property->getName()] = $property;
                 }
                 foreach ($this->extends->getReflectionConstants() as $constant) {
-                    if (!array_key_exists($constant->getName(), $this->constants)) {
-                        $parent_constants[$constant->getName()] = $constant;
-                    }
-                }
-                foreach ($this->extends->getMethods() as $method) {
-                    if (!array_key_exists($method->getName(), $this->methods)) {
-                        $parent_methods[$method->getName()] = $method;
-                    }
+                    $parent_constants[$constant->getName()] = $constant;
                 }
             }
         }
-        $interface_methods = [];
-        $interface_constants = [];
-        if ($this->node->children['implements'] !== null) {
-            foreach ($this->node->children['implements']->children as $interface) {
-                $interface_name = $this->ctx->fq_class_name($interface);
-                $class = $this->ctx->get_class($interface_name);
-                if ($class === null) {
-                    $this->ctx->error("Undefined interface `$interface_name`", $interface);
-                    continue;
-                }
-                if ($class instanceof AST_ReflectionClass) {
-                    $class->initialize();
-                }
-                if (in_array($interface_name, $this->implements)) {
-                    $this->ctx->error("Duplicate specification of interface `$interface_name`", $interface);
-                }
-                $this->implements[] = $interface_name;
-                foreach ($class->getMethods() as $method) {
-                    $interface_methods[$method->getName()] = $method;
-                }
-                foreach ($class->getReflectionConstants() as $constant) {
-                    $interface_constants[$constant->getName()] = $constant;
+
+        ### Processing methods, properties, constants
+
+        if ($this->node->flags & \ast\flags\CLASS_ENUM) {
+            $enum_type = new AST_ReflectionNamedType($this->ctx, $this, false);
+            $backing_type = $this->ctx->reflection_type_from_ast($this->node->children['type']);
+            if ($backing_type !== null) { # Must come after the check for abstract methods
+                $this->properties['value'] = new AST_ReflectionProperty(
+                    'value', null, $backing_type, \ast\flags\MODIFIER_PUBLIC | \ast\flags\MODIFIER_READONLY
+                );
+                foreach ((new \ReflectionClass(\BackedEnum::class))->getMethods() as $method) {
+                    $this->methods[strtolower($method->getName())] = new MethodMadeNonAbstract($method);
                 }
             }
+            if ($backing_type instanceof \ReflectionNamedType &&
+                !in_array($backing_type->getName(), ['int', 'string']))
+            {
+                $this->ctx->error(
+                    "Enum backing type must be `int` or `string`, got `{$backing_type->getName()}`",
+                    $this->node
+                );
+                $backing_type = null;
+            }
+        }
+        else {
+            $enum_type = null;
+            $backing_type = false;
         }
         foreach ($this->node->children['stmts']->children as $stmt) {
-            if ($stmt->kind === \ast\AST_PROP_GROUP) {
-                if ($this->node->flags & \ast\flags\CLASS_INTERFACE) {
-                    $this->ctx->error("Interfaces may not include properties", $stmt);
-                    continue;
-                }
-                $type = $this->ctx->reflection_type_from_ast($stmt->children['type']);
-                foreach ($stmt->children['props']->children as $prop) {
-                    $name = $prop->children['name'];
-                    if (array_key_exists($name, $this->properties)) {
-                        $this->ctx->error("Cannot redefine property `$name`", $stmt);
-                        continue;
-                    }
-                    $this->properties[$name] =
-                        new AST_ReflectionProperty($name, $prop->children['default'], $type, $stmt->flags);
-                }
-            }
-            else if ($stmt->kind === \ast\AST_CLASS_CONST_GROUP) {
-                $type_hint = $this->ctx->reflection_type_from_ast($stmt->children['type']);
-                foreach ($stmt->children['const']->children as $const) {
-                    $name = $const->children['name'];
-                    if (array_key_exists($name, $this->constants)) {
-                        $this->ctx->error("Cannot redefine class constant `$name`", $stmt);
-                        continue;
-                    }
-                    if ($const->children['value'] instanceof \ast\Node) {
-                        $type = $type_hint;
-                    }
-                    else {
-                        $type = get_primitive_type($const->children['value']);
-                        $type = new AST_ReflectionNamedType($this->ctx, $type, false);
-                        if (!type_has_supertype($this->ctx, [$type], [$type_hint])) {
-                            $this->ctx->error(
-                                "Constant `$name` has value that is incompatible with the type hint", $stmt
-                            );
-                        }
-                    }
-                    $this->constants[$name] = new AST_ReflectionClassConstant(
-                        $name, $const->children['value'], $type, $stmt->flags);
-                }
-            }
-            else if ($stmt->kind === \ast\AST_METHOD) {
-                if (array_key_exists($stmt->children['name'], $this->methods)) {
-                    $this->ctx->error("Cannot redeclare method `{$stmt->children['name']}`", $stmt);
-                }
-                $method = new AST_ReflectionMethod($this->ctx, $stmt);
-                $method->initialize();
-                if (array_key_exists($stmt->children['name'], $interface_methods)) {
-                    $imethod = $interface_methods[$stmt->children['name']];
-                    if (($imethod->getModifiers() ^ $method->getModifiers()) & ~\ast\flags\MODIFIER_ABSTRACT) {
-                        $this->ctx->error("Method `{$method->getName()}` has different access modifiers " .
-                            "compared to the definition in the interface", $this->node);
-                    }
-                    $ip = $imethod->getParameters();
-                    $p = $method->getParameters();
-                    for ($i = 0; $i < count($ip); ++$i) {
-                        if (!array_key_exists($i, $p)) {
-                            $this->ctx->error("Method `{$method->getName()}` has fewer parameters " .
-                                "than the definition in the interface", $this->node);
-                            break;
-                        }
-                        if ($p[$i]->isVariadic()) {
-                            break;
-                        }
-                        if ($p[$i]->getType() === null || $p[$i]->getType() instanceof \ReflectionNamedType &&
-                            $p[$i]->getType()->getName() === 'mixed')
-                        {
-                            continue;
-                        }
-                        if (!array_key_exists($i, $p) ||
-                            strval($ip[$i]->getType()) !== strval($p[$i]->getType()))
-                        {
-                            $this->ctx->error("Method `{$method->getName()}` has different parameter types " .
-                                "compared to the definition in the interface", $this->node);
-                        }
-                    }
-                    if ($i < count($p) && !$p[$i]->isVariadic()) {
-                        $this->ctx->error("Method `{$method->getName()}` has more parameters " .
-                            "than the definition in the interface", $this->node);
-                    }
-                    if ($imethod->getReturnType() !== null) {
-                        $iret = type_to_string([$imethod->getReturnType()], true);
-                        $ret = type_to_string([$method->getReturnType()], true);
-                        if($iret !== $ret) {
-                        $this->ctx->error("Method `{$method->getName()}` has a different return type " .
-                            "compared to the definition in the interface", $this->node);
-                        }
-                    }
-                }
-                $this->methods[$stmt->children['name']] = $method;
-                if ($stmt->children['name'] !== '__construct') {
-                    continue;
-                }
-                foreach ($stmt->children['params']->children as $param) {
-                    if (!($param->flags & \ast\flags\MODIFIER_PUBLIC) &&
-                        !($param->flags & \ast\flags\MODIFIER_PROTECTED) &&
-                        !($param->flags & \ast\flags\MODIFIER_PRIVATE))
-                    {
-                        continue;
-                    }
-                    $type = $this->ctx->reflection_type_from_ast($param->children['type']);
-                    $name = $param->children['name'];
-                    $this->properties[$name] =
-                        new AST_ReflectionProperty($name, $param->children['default'], $type, $param->flags);
-                }
-            }
-            else if ($stmt->kind === \ast\AST_ENUM_CASE) {
-                if (!($this->node->flags & \ast\flags\CLASS_ENUM)) {
-                    $this->ctx->error('`case` can only be used in enums', $stmt);
-                    continue;
-                }
-                $name = $stmt->children['name'];
-                $value = $stmt->children['expr'];
-                if ($backing_type === null && $value !== null) {
-                    $this->ctx->error("Case `$name` of a non-backed enum must not have a value", $stmt);
-                }
-                else if ($backing_type !== null && $value === null) {
-                    $this->ctx->error("Case `$name` of a backed enum must have a value", $stmt);
-                }
-                else if ($backing_type !== null &&
-                    ($backing_type?->flags === \ast\flags\TYPE_STRING) !== is_string($value))
-                {
-                    $this->ctx->error("Type of case `$name` does not match the enum's backing type", $stmt);
-                }
-                $this->constants[$name] = new AST_ReflectionClassConstant($name, null, $enum_type,
-                    \ast\flags\MODIFIER_PUBLIC | \ast\flags\MODIFIER_READONLY);
-            }
+            $this->process_class_stmt($stmt, $interface_methods, $backing_type, $enum_type);
         }
+
+        ### Processing traits
+
         $trait_methods = [];
         $ignored_trait_methods = [];
         foreach ($this->node->children['stmts']->children as $stmt) {
@@ -1320,14 +1415,22 @@ class AST_ReflectionClass extends \ReflectionClass
                         );
                         continue;
                     }
-                    $trait_methods[$method->getName()] = $method;
+                    $trait_methods[strtolower($method->getName())] = $method;
                 }
             }
         }
+
+        ### Combining methods, constants, properties
+
         $this->methods = $this->methods + $trait_methods + $parent_methods + $interface_methods;
-        $this->constants = $this->constants + $interface_constants + $parent_constants;
+        $this->constants = $this->constants + $parent_constants + $interface_constants;
         $this->properties = $this->properties + $parent_properties;
-        if (!($this->node->flags & \ast\flags\MODIFIER_ABSTRACT)) {
+
+        ### Miscellaneous
+
+        if (!($this->node->flags & \ast\flags\MODIFIER_ABSTRACT) &&
+            !($this->node->flags & \ast\flags\CLASS_INTERFACE))
+        {
             foreach ($this->methods as $method) {
                 if (!($method->getModifiers() & \ast\flags\MODIFIER_ABSTRACT)) {
                     continue;
@@ -1337,19 +1440,9 @@ class AST_ReflectionClass extends \ReflectionClass
                 );
             }
         }
-        if ($backing_type !== null) { # Must come after the check for abstract methods
-            $backing_type = $this->ctx->reflection_type_from_ast($this->node->children['type']);
-            $this->properties['value'] = new AST_ReflectionProperty(
-                'value', null, $backing_type, \ast\flags\MODIFIER_PUBLIC | \ast\flags\MODIFIER_READONLY
-            );
-            foreach ((new \ReflectionClass(\BackedEnum::class))->getMethods() as $method) {
-                $this->methods[$method->getName()] = $method;
-            }
-        }
 
-        $this->methods_lowercase = array_change_key_case($this->methods);
-        if (array_key_exists('__tostring', $this->methods_lowercase)) {
-            $this->implements[] = \Stringable::class;
+        if (array_key_exists('__tostring', $this->methods)) {
+            $this->interface_names []= \Stringable::class;
         }
     }
 
@@ -1395,12 +1488,7 @@ class AST_ReflectionClass extends \ReflectionClass
 
     function getInterfaceNames(): array
     {
-        $interface_names = [];
-        foreach ($this->implements as $interface_name) {
-            $interface = $this->ctx->get_class($interface_name);
-            $interface_names = [...$interface_names, $interface_name, ...$interface->getInterfaceNames()];
-        }
-        return array_unique($interface_names);
+        return $this->interface_names;
     }
 
     function getConstructor(): ?\ReflectionMethod
@@ -1430,17 +1518,17 @@ class AST_ReflectionClass extends \ReflectionClass
 
     function hasMethod(string $name): bool
     {
-        return array_key_exists(strtolower($name), $this->methods_lowercase);
+        return array_key_exists(strtolower($name), $this->methods);
     }
 
     function getMethod(string $name): \ReflectionMethod
     {
-        return $this->methods_lowercase[strtolower($name)] ?? throw new \Exception;
+        return $this->methods[strtolower($name)] ?? throw new \Exception;
     }
 
     function getMethods(?int $filter=null): array
     {
-        return $this->methods;
+        return array_values($this->methods);
     }
 }
 
@@ -1868,7 +1956,7 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
                     $ctx->error("Undefined closure variable `$var`", $node);
                 }
             }
-            $ctx2->function = new AST_ReflectionClosure($ctx2, $node);
+            $ctx2->function = new AST_ReflectionFunction($ctx2, $node);
             $ctx2->function->initialize();
         }
         else if ($node->kind === \ast\AST_METHOD) {
@@ -1905,7 +1993,7 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
     }
     else if ($node->kind === \ast\AST_ARROW_FUNC) {
         $ctx = clone $ctx;
-        $ctx->function = new AST_ReflectionClosure($ctx, $node);
+        $ctx->function = new AST_ReflectionFunction($ctx, $node);
         $ctx->function->initialize();
         foreach ($ctx->function->getParameters() as $p) {
             $ctx->add_defined_variable($p->getName(), [$p->getType()]);
@@ -1914,8 +2002,12 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
     return $ctx;
 }
 
-function validate_ast_children(ASTContext $ctx, \ast\Node $node): void
+function validate_ast_children(ASTContext $ctx, \ast\Node $node, ?\ast\Node $parent_node=null): void
 {
+    $prop_kinds = [\ast\AST_CLASS_CONST, \ast\AST_STATIC_PROP, \ast\AST_PROP];
+    if (in_array($node->kind, $prop_kinds) && !in_array($parent_node?->kind, $prop_kinds)) {
+        get_possible_types($ctx, $node, true, $ctx->is_in_assignment);
+    }
     if (($child_ctx = validate_ast_node($ctx, $node)) === null) {
         return;
     }
@@ -1923,15 +2015,11 @@ function validate_ast_children(ASTContext $ctx, \ast\Node $node): void
     if (in_array($node->kind, [\ast\AST_PROP, \ast\AST_VAR, \ast\AST_DIM])) {
         $child_ctx->is_in_assignment = false;
     }
-    $prop_kinds = [\ast\AST_CLASS_CONST, \ast\AST_STATIC_PROP, \ast\AST_PROP];
     foreach ($node->children as $child) {
         if (!($child instanceof \ast\Node)) {
             continue;
         }
-        if (in_array($child->kind, $prop_kinds) && !in_array($node->kind, $prop_kinds)) {
-            get_possible_types($child_ctx, $child, true, $child_ctx->is_in_assignment);
-        }
-        validate_ast_children($child_ctx, $child);
+        validate_ast_children($child_ctx, $child, $parent_node);
     }
     $child_ctx->is_in_assignment = $is_in_assignment;
     $ctx->has_error = $ctx->has_error || $child_ctx->has_error;

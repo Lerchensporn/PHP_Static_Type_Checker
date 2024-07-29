@@ -25,7 +25,7 @@ chmod +x php_static_type_checker.php
 - False positives are not desirable.
 
 - This application omits non-essential features in favor of performance and maintainability.
-  I regard the tool as “almost” feature-complete with the current feature set that fits in 2000 SLOC.
+  I regard the tool as “almost” feature-complete with the current feature set that fits in 2500 SLOC.
   Out of scope are:
    - extensive support for PHPDoc comments,
    - support for outdated PHP versions,
