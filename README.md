@@ -33,6 +33,8 @@ chmod +x php_static_type_checker.php
    - detection of dead code and unused identifiers are of scope, since it creates no runtime
      defects and may obstruct debugging,
    - sophisticated analysis of control structures.
+   - to validate assignments of constants and default values, because they may contain arithmetic
+     expressions, which are too hard to evaluate.
 
 ## How could PHP better support static code analysis?
 

@@ -15,6 +15,7 @@ class ASTContext
 {
     public ?\ReflectionFunctionAbstract $function = null;
     public array $included_files = [];
+    public bool $make_self_check = false;
     public ?\ReflectionClass $class = null;
     public array $defined_classes = [];
     public array $defined_interface_names = [];
@@ -512,6 +513,7 @@ function get_possible_types(ASTContext $ctx, mixed $node, bool $print_error=fals
 
 function validate_arguments(ASTContext $ctx, ?\ReflectionFunctionAbstract $function, \ast\Node $node): void
 {
+    validate_ast_children($ctx, $node);
     if ($node->kind === \ast\AST_CALLABLE_CONVERT) {
         return;
     }
@@ -799,11 +801,6 @@ class AST_ReflectionProperty extends \ReflectionProperty
         return $this->_name;
     }
 
-    function getDefaultValue(): mixed
-    {
-        return $this->default;
-    }
-
     function getType(): ?\ReflectionType
     {
         return $this->type;
@@ -817,18 +814,12 @@ class AST_ReflectionProperty extends \ReflectionProperty
 
 class AST_ReflectionClassConstant extends \ReflectionClassConstant
 {
-    function __construct(private string $_name, private mixed $value, private ?\ReflectionType $type,
-        private int $flags)
+    function __construct(private string $_name, private ?\ReflectionType $type, private int $flags)
     {}
 
     function getName(): string
     {
         return $this->_name;
-    }
-
-    function getValue(): mixed
-    {
-        return $this->value;
     }
 
     function getType(): ?\ReflectionType
@@ -1129,8 +1120,7 @@ class AST_ReflectionClass extends \ReflectionClass
                         "for constant `$name`", $const
                     );
                 }
-                $this->constants[$name] = new AST_ReflectionClassConstant(
-                    $name, $const->children['value'], $value_type, $stmt->flags);
+                $this->constants[$name] = new AST_ReflectionClassConstant($name, $value_type, $stmt->flags);
             }
         }
         else if ($stmt->kind === \ast\AST_METHOD) {
@@ -1138,7 +1128,9 @@ class AST_ReflectionClass extends \ReflectionClass
                 $this->ctx->error("The interface method must not have a body", $stmt);
             }
             $name = strtolower($stmt->children['name']);
-            if ($this->extends?->getMethod($name)?->getModifiers() & \ast\flags\MODIFIER_FINAL) {
+            if ($this->extends?->hasMethod($name) &&
+                $this->extends?->getModifiers() & \ast\flags\MODIFIER_FINAL)
+            {
                 $this->ctx->error("Cannot redeclare final method `$name`", $this->node);
                 return;
             }
@@ -1228,7 +1220,7 @@ class AST_ReflectionClass extends \ReflectionClass
             {
                 $this->ctx->error("Type of case `$name` does not match the enum's backing type", $stmt);
             }
-            $this->constants[$name] = new AST_ReflectionClassConstant($name, null, $enum_type,
+            $this->constants[$name] = new AST_ReflectionClassConstant($name, $enum_type,
                 \ast\flags\MODIFIER_PUBLIC | \ast\flags\MODIFIER_READONLY);
         }
     }
@@ -1380,27 +1372,9 @@ class AST_ReflectionClass extends \ReflectionClass
                     $trait->initialize();
                 }
                 foreach ($trait->getProperties() as $p) {
-                    if (array_key_exists($p->getName(), $this->properties) &&
-                        ($this->properties[$p->getName()]->getDefaultValue() !== $p->getDefaultValue() ||
-                        $this->properties[$p->getName()]->getModifiers() !== $p->getModifiers()))
-                    {
-                        $this->ctx->error(
-                            "Property `{$p->getName()}` from trait `$trait_name` has incompatible " .
-                            "other definitions elsewhere", $trait_node
-                        );
-                    }
                     $this->properties[$p->getName()] = $p;
                 }
                 foreach ($trait->getReflectionConstants() as $c) {
-                    if (array_key_exists($c->getName(), $this->constants) &&
-                        ($this->constants[$c->getName()]->getValue() !== $c->getValue() ||
-                        $this->constants[$c->getName()]->getModifiers() !== $c->getModifiers()))
-                    {
-                        $this->ctx->error(
-                            "Constant `{$c->getName()}` from trait `$trait_name` has incompatible " .
-                            "definitions elsewhere", $trait_node
-                        );
-                    }
                     $this->constants[$c->getName()] = $c;
                 }
                 foreach ($trait->getMethods() as $method) {
@@ -1807,7 +1781,7 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
         $ctx->is_in_assignment = true;
         validate_ast_children($ctx, $node->children['var']);
         $ctx->is_in_assignment = false;
-        $possible_types = get_possible_types($ctx, $node->children['var'], true, true);
+        $possible_types = get_possible_types($ctx, $node->children['var'], false, true);
         if ($possible_types === []) {
             return null;
         }
@@ -1936,6 +1910,7 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
     }
     else if (in_array($node->kind, [\ast\AST_FUNC_DECL, \ast\AST_METHOD, \ast\AST_CLOSURE])) {
         $ctx2 = clone $ctx;
+        $ctx2->has_return = false;
         $ctx2->reset_defined_variables();
 
         if ($node->kind !== \ast\AST_METHOD) {
@@ -1977,19 +1952,7 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
         if ($node->children['stmts'] !== null) {
             find_defined_variables($ctx2, $node->children['stmts']);
         }
-        foreach ($node->children as $name => $child) {
-            if ($child instanceof \ast\Node && $name !== 'params') {
-                validate_ast_children($ctx2, $child);
-            }
-        }
-        if (!$ctx2->has_return && $ctx2->function->is_return_required()) {
-            $ctx2->error(
-                "Function `{$ctx2->function->getName()}` has a non-void return type hint but lacks a " .
-                "return statement", $node
-            );
-        }
-        $ctx->has_error = $ctx->has_error || $ctx2->has_error;
-        return null;
+        return $ctx2;
     }
     else if ($node->kind === \ast\AST_ARROW_FUNC) {
         $ctx = clone $ctx;
@@ -2022,6 +1985,14 @@ function validate_ast_children(ASTContext $ctx, \ast\Node $node, ?\ast\Node $par
         validate_ast_children($child_ctx, $child, $parent_node);
     }
     $child_ctx->is_in_assignment = $is_in_assignment;
+    if (in_array($node->kind, [\ast\AST_FUNC_DECL, \ast\AST_METHOD, \ast\AST_CLOSURE]) &&
+        !$child_ctx->has_return && $child_ctx->function->is_return_required())
+    {
+        $child_ctx->error(
+            "Function `{$child_ctx->function->getName()}` has a non-void return type hint but lacks a " .
+            "return statement", $node
+        );
+    }
     $ctx->has_error = $ctx->has_error || $child_ctx->has_error;
 }
 
@@ -2074,6 +2045,10 @@ function traverse_classes_functions(ASTContext $ctx, \ast\Node $node): void
         else if ($child->kind === \ast\AST_CONST_DECL) {
             foreach ($child->children as $const) {
                 $name = $ctx->namespace . $const->children['name'];
+                if ($ctx->defined($name) && !$ctx->make_self_check) {
+                    $ctx->error("Redeclaration of constant `$name`", $const);
+                    continue;
+                }
                 $ctx->defined_constants[$name] = $const->children['value'];
             }
         }
@@ -2088,22 +2063,21 @@ function traverse_classes_functions(ASTContext $ctx, \ast\Node $node): void
             $ctx->fill_use_aliases($child);
         }
         else if ($child->kind === \ast\AST_CLASS) {
-            $name = strtolower($ctx->namespace . $child->children['name']);
-            if (array_key_exists($name, $ctx->defined_classes)) {
+            $name = $ctx->namespace . $child->children['name'];
+            if ($ctx->class_exists($name) && !$ctx->make_self_check) {
                 $ctx->error("Redeclaration of class `$name`", $child);
-                $ctx->defined_classes[$name] = null;
-                continue;
+                $ctx->defined_classes[strtolower($name)] = null;
             }
-            $ctx->defined_classes[$name] = new AST_ReflectionClass($ctx, $child);
-            $ctx->defined_interface_names[] = $name;
+            $ctx->defined_classes[strtolower($name)] = new AST_ReflectionClass($ctx, $child);
+            $ctx->defined_interface_names[] = strtolower($name);
         }
         else if ($child->kind === \ast\AST_FUNC_DECL) {
-            $name = strtolower($ctx->namespace . $child->children['name']);
-            if (array_key_exists($name, $ctx->defined_functions)) {
+            $name = $ctx->namespace . $child->children['name'];
+            if ($ctx->function_exists($name) && !$ctx->make_self_check) {
                 $ctx->error("Redeclaration of function `$name`", $child);
                 continue;
             }
-            $ctx->defined_functions[$name] = new AST_ReflectionFunction($ctx, $child);
+            $ctx->defined_functions[strtolower($name)] = new AST_ReflectionFunction($ctx, $child);
         }
     }
 }
@@ -2150,6 +2124,7 @@ function main(array $argv): int
     $ignored_file_prefixes = [];
     $print_statistics = false;
     $ctx = new ASTContext;
+    $ctx->make_self_check = in_array(__FILE__, array_map(realpath(...), array_slice($argv, 1)));
     for ($i = 1; $i < count($argv); ++$i) {
         if ($argv[$i] === '--ignore-file-prefix' && $i < count($argv) - 1) {
             $prefix = realpath('') . '/' . $argv[++$i];
@@ -2191,11 +2166,10 @@ function main(array $argv): int
     }
 
     $sloc_count = 0;
-    $make_self_check = in_array(__FILE__, array_map(realpath(...), array_slice($argv, 1)));
     $checked_files = [];
     $ignored_files = [];
     foreach ($ctx->included_files as $file_name => $node) {
-        if (!$make_self_check && $file_name === __FILE__) {
+        if (!$ctx->make_self_check && $file_name === __FILE__) {
             continue;
         }
         $ignore = false;
