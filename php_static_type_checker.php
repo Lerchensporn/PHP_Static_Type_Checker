@@ -495,7 +495,14 @@ function get_possible_types(ASTContext $ctx, mixed $node, bool $print_error=fals
                 if (!$class->hasProperty($node->children['prop'])) {
                     continue;
                 }
-                $possible_types[] = $class->getProperty($node->children['prop'])->getType();
+                $prop = $class->getProperty($node->children['prop']);
+                if ($prop->getModifiers() & \ast\flags\MODIFIER_STATIC) {
+                    if ($print_error) {
+                        $ctx->error("Non-static access to static property `{$prop->getName()}`", $node);
+                    }
+                    return [null];
+                }
+                $possible_types[] = $prop->getType();
             }
         }
         if (count($possible_types) === 0) {
@@ -513,7 +520,6 @@ function get_possible_types(ASTContext $ctx, mixed $node, bool $print_error=fals
 
 function validate_arguments(ASTContext $ctx, ?\ReflectionFunctionAbstract $function, \ast\Node $node): void
 {
-    validate_ast_children($ctx, $node);
     if ($node->kind === \ast\AST_CALLABLE_CONVERT) {
         return;
     }
