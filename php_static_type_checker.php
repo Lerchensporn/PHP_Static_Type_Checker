@@ -1753,6 +1753,7 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
         }
     }
     else if ($node->kind === \ast\AST_FOREACH) {
+        validate_ast_children($ctx, $node->children['expr']);
         if (!is_statement_writable($node->children['value'])) {
             $ctx->error("The value of the `foreach` loop is not writable", $node);
             return null;
