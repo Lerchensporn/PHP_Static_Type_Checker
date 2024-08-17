@@ -1989,7 +1989,7 @@ function validate_ast_children(ASTContext $ctx, \ast\Node $node, ?\ast\Node $par
         if (!($child instanceof \ast\Node)) {
             continue;
         }
-        validate_ast_children($child_ctx, $child, $parent_node);
+        validate_ast_children($child_ctx, $child, $node);
     }
     $child_ctx->is_in_assignment = $is_in_assignment;
     if (in_array($node->kind, [\ast\AST_FUNC_DECL, \ast\AST_METHOD, \ast\AST_CLOSURE]) &&
