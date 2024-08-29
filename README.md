@@ -69,3 +69,5 @@ function arguments, not for properties.
 
 The `insteadof` operator is awkward. Something like `ignore trait2::method` would be clearer, more
 powerful, and stricter (requiring `trait2::method` to exist) than `trait1::method insteadof trait2` 
+
+An inconsistency: a type flag exists for `static` but not for `self` and `parent`.

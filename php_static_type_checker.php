@@ -82,13 +82,6 @@ class ASTContext
         # identifiers, even if they would normally be case-insensitive in PHP.
 
         $lower_name = strtolower($name);
-        if ($lower_name === 'self') {
-            return $this->class;
-        }
-        if ($lower_name === 'parent') {
-            $parent = $this->class->getParentClass();
-            return $parent === false ? null : $parent;
-        }
         if (array_key_exists($lower_name, $this->defined_classes)) {
             return $this->defined_classes[$lower_name];
         }
@@ -118,24 +111,48 @@ class ASTContext
         return array_key_exists(strtolower($name), $this->defined_functions) || function_exists($name);
     }
 
-    function fq_class_name(\ast\Node $name_node, bool $print_error=true): string
+    function fq_class_name(\ast\Node $name_node, bool $print_error=true): ?string
     {
-        if (!in_array($name_node->children['name'], ['self', 'parent'])) {
-            if ($name_node->flags === \ast\flags\NAME_FQ) {
-                return $name_node->children['name'];
+        if ($name_node->children['name'] === 'self') {
+            if ($this->class === null) {
+                if ($print_error) {
+                    $this->error('Cannot access `self` when no class scope is active', $name_node);
+                }
+                return null;
             }
-            return $this->use_aliases[$name_node->children['name']] ??
-                   $this->namespace . $name_node->children['name'];
-        }
-        if ($this->class !== null) {
             return $this->class->getName();
         }
-        if ($print_error) {
-            $this->error('Cannot access `self` when no class scope is active', $name_node);
+        if ($name_node->children['name'] === 'static') {
+            if ($this->class === null) {
+                if ($print_error) {
+                    $this->error('Cannot access `static` when no class scope is active', $name_node);
+                }
+                return null;
+            }
+            return $this->class->getName();
         }
-        # We cannot return `null` because `ReflectionNamedType::getName()` must not be null, even
-        # when the type is invalid.
-        return 'self';
+        if ($name_node->children['name'] === 'parent') {
+            if ($this->class === null) {
+                if ($print_error) {
+                    $this->error('Cannot access `parent` when no class scope is active', $name_node);
+                }
+                return null;
+            }
+            $parent = $this->class->getParentClass();
+            if ($parent === false) {
+                if ($print_error) {
+                    $this->error('Cannot access `parent` when the current class has no parent',
+                        $name_node);
+                }
+                return null;
+            }
+            return $parent->getName();
+        }
+        if ($name_node->flags === \ast\flags\NAME_FQ) {
+            return $name_node->children['name'];
+        }
+        return $this->use_aliases[$name_node->children['name']] ??
+               $this->namespace . $name_node->children['name'];
     }
 
     function reflection_type_from_ast(?\ast\Node $node, bool $has_default_null=false):
@@ -164,9 +181,9 @@ class ASTContext
                     $this->error("Type hint `void` must not be nullable", $node);
                 }
             }
-            return new AST_ReflectionNamedType($this, $node->children['type'], true);
+            return AST_ReflectionNamedType::try_create($this, $node->children['type'], true);
         }
-        return new AST_ReflectionNamedType($this, $node, $has_default_null);
+        return AST_ReflectionNamedType::try_create($this, $node, $has_default_null);
     }
 
     function fill_use_aliases(\ast\Node $node)
@@ -671,7 +688,7 @@ class AST_ReflectionIntersectionType extends \ReflectionIntersectionType
     function __construct(private ASTContext $ctx, private \ast\Node $node)
     {
         foreach ($this->node->children as $child) {
-            $this->types[] = new AST_ReflectionNamedType($this->ctx, $child, false);
+            $this->types[] = AST_ReflectionNamedType::try_create($this->ctx, $child, false);
         }
     }
 
@@ -707,10 +724,10 @@ class AST_ReflectionUnionType extends \ReflectionUnionType
                     break;
                 }
             }
-            $this->types[] = new AST_ReflectionNamedType($ctx, $child, false);
+            $this->types[] = AST_ReflectionNamedType::try_create($ctx, $child, false);
         }
         if ($has_default_null) {
-            $this->types[] = new AST_ReflectionNamedType($ctx, null, false);
+            $this->types[] = AST_ReflectionNamedType::try_create($ctx, 'null', false);
         }
     }
 
@@ -730,17 +747,31 @@ class AST_ReflectionNamedType extends \ReflectionNamedType
     private string $type_name;
     public bool $allows_null;
 
-    function __construct(ASTContext $ctx, private null|string|\ReflectionClass|\ast\Node $node,
+    static function try_create(ASTContext $ctx, null|string|\ReflectionClass|\ast\Node $node,
+        bool $is_nullable): ?\ReflectionNamedType
+    {
+        try {
+            return new self(...func_get_args());
+        }
+        catch (\TypeError) {
+            return null;
+        }
+    }
+
+    function __construct(ASTContext $ctx, private string|\ReflectionClass|\ast\Node $node,
         bool $is_nullable)
     {
-        if ($node === null) {
-            $this->type_name = 'null';
-        }
-        else if (is_string($node)) {
+        if (is_string($node)) {
             $this->type_name = $node;
         }
         else if ($node instanceof \ReflectionClass) {
             $this->type_name = $node->getName();
+        }
+        else if ($node->kind === \ast\AST_TYPE && $node->flags === \ast\flags\TYPE_STATIC) {
+            if ($ctx->class === null) {
+                $ctx->error('Cannot access `static` when no class scope is active', $node);
+            }
+            $this->type_name = $ctx->class?->getName();
         }
         else if ($node->kind === \ast\AST_TYPE) {
             $this->type_name = match ($node->flags) {
@@ -756,20 +787,23 @@ class AST_ReflectionNamedType extends \ReflectionNamedType
                 \ast\flags\TYPE_NULL => 'null',
                 \ast\flags\TYPE_FALSE => 'false',
                 \ast\flags\TYPE_TRUE => 'true',
-                \ast\flags\TYPE_STATIC => 'static',
                 \ast\flags\TYPE_MIXED => 'mixed',
                 \ast\flags\TYPE_NEVER => 'never',
                 default => throw new \Exception('Unknown type flag')
             };
         }
         else if ($node->kind === \ast\AST_NAME) {
-            $this->type_name = $ctx->fq_class_name($node, false);
+            $type_name = $ctx->fq_class_name($node);
+            if ($type_name === null) {
+                throw new \TypeError;
+            }
+            $this->type_name = $type_name;
             if (!$ctx->class_exists($this->type_name) && !interface_exists($this->type_name)) {
                 $ctx->error("Undefined type `{$this->type_name}` in type hint", $node);
             }
         }
         $this->allows_null =
-            $node === null || $is_nullable || $node instanceof \ast\Node && (
+            $is_nullable || $node instanceof \ast\Node && (
             $node->kind === \ast\AST_TYPE && $node->flags === \ast\flags\TYPE_NULL ||
             $node->kind === \ast\AST_TYPE && $node->flags === \ast\flags\TYPE_MIXED);
     }
@@ -1118,7 +1152,7 @@ class AST_ReflectionClass extends \ReflectionClass
                     return;
                 }
                 $value_type = get_primitive_type($const->children['value']);
-                $value_type = new AST_ReflectionNamedType($this->ctx, $value_type, false);
+                $value_type = AST_ReflectionNamedType::try_create($this->ctx, $value_type, false);
                 if (!type_has_supertype($this->ctx, [$value_type], [$type_hint])) {
                     $type_str = type_to_string([$type_hint]);
                     $this->ctx->error(
@@ -1312,7 +1346,7 @@ class AST_ReflectionClass extends \ReflectionClass
         ### Processing methods, properties, constants
 
         if ($this->node->flags & \ast\flags\CLASS_ENUM) {
-            $enum_type = new AST_ReflectionNamedType($this->ctx, $this, false);
+            $enum_type = AST_ReflectionNamedType::try_create($this->ctx, $this, false);
             $backing_type = $this->ctx->reflection_type_from_ast($this->node->children['type']);
             if ($backing_type !== null) { # Must come after the check for abstract methods
                 $this->properties['value'] = new AST_ReflectionProperty(
