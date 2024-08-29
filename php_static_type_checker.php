@@ -222,12 +222,12 @@ function type_to_string(array $types, bool $sort=false): string
     $type_list = [];
     foreach ($types as $type) {
         if (is_string($type)) {
-            $type_list[] = $type;
+            $type_list []= $type;
         }
         else if ($type instanceof \ReflectionNamedType) {
-            $type_list[] = $type->getName();
+            $type_list []= $type->getName();
             if ($type->allowsNull() && !in_array($type->getName(), ['null', 'mixed'])) {
-                $type_list[] = 'null';
+                $type_list []= 'null';
             }
         }
         else if ($type instanceof \ReflectionUnionType) {
@@ -238,7 +238,7 @@ function type_to_string(array $types, bool $sort=false): string
             if ($sort) {
                 sort($it);
             }
-            $type_list[] = implode('&', $it);
+            $type_list []= implode('&', $it);
         }
     }
     $type_list = array_unique($type_list);
@@ -412,7 +412,7 @@ function get_possible_types(ASTContext $ctx, mixed $node, bool $print_error=fals
             if ($const_or_prop === false) {
                 continue;
             }
-            $possible_types[] = $const_or_prop->getType();
+            $possible_types []= $const_or_prop->getType();
         }
         if (count($possible_types) > 0) {
             return $possible_types;
@@ -519,7 +519,7 @@ function get_possible_types(ASTContext $ctx, mixed $node, bool $print_error=fals
                     }
                     return [null];
                 }
-                $possible_types[] = $prop->getType();
+                $possible_types []= $prop->getType();
             }
         }
         if (count($possible_types) === 0) {
@@ -674,7 +674,7 @@ function get_possible_methods(ASTContext $ctx, \ast\Node $node, bool $print_erro
                 return null;
             }
             if ($class->hasMethod($node->children['method'])) {
-                $possible_methods[] = $class->getMethod($node->children['method']);
+                $possible_methods []= $class->getMethod($node->children['method']);
             }
         }
     }
@@ -688,7 +688,7 @@ class AST_ReflectionIntersectionType extends \ReflectionIntersectionType
     function __construct(private ASTContext $ctx, private \ast\Node $node)
     {
         foreach ($this->node->children as $child) {
-            $this->types[] = AST_ReflectionNamedType::try_create($this->ctx, $child, false);
+            $this->types []= AST_ReflectionNamedType::try_create($this->ctx, $child, false);
         }
     }
 
@@ -711,7 +711,7 @@ class AST_ReflectionUnionType extends \ReflectionUnionType
     {
         foreach ($node->children as $child) {
             if ($child->kind === \ast\AST_TYPE_INTERSECTION) {
-                $this->types[] = new AST_ReflectionIntersectionType($ctx, $child);
+                $this->types []= new AST_ReflectionIntersectionType($ctx, $child);
                 continue;
             }
             if (count($node->children) > 0) {
@@ -724,10 +724,10 @@ class AST_ReflectionUnionType extends \ReflectionUnionType
                     break;
                 }
             }
-            $this->types[] = AST_ReflectionNamedType::try_create($ctx, $child, false);
+            $this->types []= AST_ReflectionNamedType::try_create($ctx, $child, false);
         }
         if ($has_default_null) {
-            $this->types[] = AST_ReflectionNamedType::try_create($ctx, 'null', false);
+            $this->types []= AST_ReflectionNamedType::try_create($ctx, 'null', false);
         }
     }
 
@@ -959,7 +959,7 @@ trait AST_ReflectionFunctionAbstract
             if (($param->flags & \ast\flags\PARAM_VARIADIC) && $param->children['default'] !== null) {
                 $this->ctx->error("A variadic parameter cannot have a default value", $param);
             }
-            $this->parameters[] = new AST_ReflectionParameter($param, $type_hint);
+            $this->parameters []= new AST_ReflectionParameter($param, $type_hint);
             if (($param->flags & \ast\flags\PARAM_VARIADIC)) {
                 $this->is_variadic = true;
                 if ($i < count($this->node->children['params']->children) - 1) {
@@ -1399,7 +1399,7 @@ class AST_ReflectionClass extends \ReflectionClass
                         $this->ctx->error("Undefined trait `$insteadof_name`", $insteadof);
                     }
                 }
-                $ignored_trait_methods[$insteadof_name][] = $method;
+                $ignored_trait_methods[$insteadof_name] []= $method;
             }
             foreach ($stmt->children['traits']->children as $trait_node) {
                 $trait_name = $this->ctx->fq_class_name($trait_node);
@@ -1596,7 +1596,7 @@ function find_defined_variables(ASTContext $ctx, \ast\Node $node): void
         foreach ($node->children['class']->children as $class_node) {
             $class = $ctx->fq_class_name($class_node);
             if ($ctx->class_exists($class) && !interface_exists($class)) {
-                $possible_types[] = $class;
+                $possible_types []= $class;
             }
         }
         $var = $node->children['var']->children['name'];
@@ -1843,7 +1843,7 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
                 $ctx->error("Undefined class `$class`", $node->children['class']);
                 continue;
             }
-            $possible_types[] = $class;
+            $possible_types []= $class;
         }
         if ($node->children['var'] !== null) {
             $var = $node->children['var']->children['name'];
@@ -1863,7 +1863,7 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
             $parent_class_names = [];
             if (($parent = $ctx->class) !== null) {
                 while (($parent = $parent->getParentClass()) !== false) {
-                    $parent_class_names[] = strtolower($parent->getName());
+                    $parent_class_names []= strtolower($parent->getName());
                 }
             }
             if (!in_array(strtolower($node->children['class']->children['name']),
@@ -2110,7 +2110,7 @@ function traverse_classes_functions(ASTContext $ctx, \ast\Node $node): void
                 $ctx->defined_classes[strtolower($name)] = null;
             }
             $ctx->defined_classes[strtolower($name)] = new AST_ReflectionClass($ctx, $child);
-            $ctx->defined_interface_names[] = strtolower($name);
+            $ctx->defined_interface_names []= strtolower($name);
         }
         else if ($child->kind === \ast\AST_FUNC_DECL) {
             $name = $ctx->namespace . $child->children['name'];
@@ -2173,7 +2173,7 @@ function main(array $argv): int
             do {
                 $prefix = preg_replace('|/[^/]*?/\.\.|', '', $prefix, -1, $count);
             } while ($count > 0);
-            $ignored_file_prefixes[] = $prefix;
+            $ignored_file_prefixes []= $prefix;
             continue;
         }
         if ($argv[$i] === '--statistics') {
@@ -2216,7 +2216,7 @@ function main(array $argv): int
         $ignore = false;
         foreach ($ignored_file_prefixes as $ignored_file_prefix) {
             if (str_starts_with($file_name, $ignored_file_prefix)) {
-                $ignored_files[] = $file_name;
+                $ignored_files []= $file_name;
                 $ignore = true;
                 break;
             }
@@ -2224,7 +2224,7 @@ function main(array $argv): int
         if ($ignore) {
             continue;
         }
-        $checked_files[] = $file_name;
+        $checked_files []= $file_name;
         $code = file_get_contents($file_name);
         if ($print_statistics) {
             $sloc_count += substr_count($code, "\n");
