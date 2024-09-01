@@ -810,7 +810,7 @@ class AST_ReflectionNamedType extends \ReflectionNamedType
 
     function isBuiltin(): bool
     {
-        return $this->node === null || $this->node->kind === \ast\AST_TYPE;
+        return $this->node->kind === \ast\AST_TYPE;
     }
 
     function allowsNull(): bool
@@ -1784,6 +1784,9 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
         }
         else {
             $returned_type = get_possible_types($ctx, $node->children['expr']);
+            if (count($returned_type) === 0) {
+                return $ctx;
+            }
         }
         if (!type_has_supertype($ctx, $returned_type, [$return_type_hint])) {
             $returned_type_str = type_to_string($returned_type);
