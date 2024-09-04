@@ -13,7 +13,7 @@ class DefinedVariable
 
 class ASTContext
 {
-    public ?\ReflectionFunctionAbstract $function = null;
+    public null|\ReflectionFunctionAbstract|AST_ReflectionFunctionAbstract $function = null;
     public array $included_files = [];
     public bool $make_self_check = false;
     public ?\ReflectionClass $class = null;
@@ -63,17 +63,52 @@ class ASTContext
         $this->add_defined_variable('_SESSION', ['array']);
     }
 
-    function defined(string $name): bool
+    private static function normalize_constant_name(string $name): string
     {
+        if (($last_backslash = strrpos($name, '\\')) === false) {
+            return $name;
+        }
+        return strtolower(substr($name, 0, $last_backslash)) . substr($name, $last_backslash);
+    }
+
+    function constant_exists_with_fallback(\ast\Node $name_node): bool
+    {
+        $name = $this->normalize_constant_name($this->fq_name($name_node));
+        if (array_key_exists($name, $this->defined_constants) || defined($name)) {
+            return true;
+        }
+
+        // Look up the global scope as a fallback
+
+        $name = $this->normalize_constant_name($name_node->children['name']);
         return array_key_exists($name, $this->defined_constants) || defined($name);
     }
 
-    function get_constant_type(string $name): ?string
+    function get_constant_type(\ast\Node $name_node): ?string
     {
+        # A return value of `null` can mean an unknown type or that the constant does not exist.
+
+        $name = $this->normalize_constant_name($this->fq_name($name_node));
+        if (array_key_exists(strtolower($name), $this->defined_constants)) {
+            return get_primitive_type($this->defined_constants[strtolower($name)]);
+        }
         if (defined($name)) {
             return get_primitive_type(constant($name));
         }
-        return get_primitive_type($this->defined_constants[$name]);
+        if ($name_node->flags === \ast\flags\NAME_FQ) {
+            return null;
+        }
+
+        // Look up the global scope as a fallback
+
+        $name = $this->normalize_constant_name($name_node->children['name']);
+        if (array_key_exists(strtolower($name), $this->defined_constants)) {
+            return get_primitive_type($this->defined_constants[strtolower($name)]);
+        }
+        if (defined($name)) {
+            return get_primitive_type(constant($name));
+        }
+        return null;
     }
 
     function get_class(string $name): ?\ReflectionClass
@@ -91,9 +126,29 @@ class ASTContext
         return null;
     }
 
-    function get_function(string $name)
+    function get_function(\ast\Node $name_node): ?\ReflectionFunctionAbstract
     {
-        return $this->defined_functions[strtolower($name)] ?? new \ReflectionFunction($name);
+        $name = $this->fq_name($name_node);
+        if (array_key_exists(strtolower($name), $this->defined_functions)) {
+            return $this->defined_functions[strtolower($name)];
+        }
+        if (function_exists($name)) {
+            return new \ReflectionFunction($name);
+        }
+        if ($name_node->flags === \ast\flags\NAME_FQ) {
+            return null;
+        }
+
+        // Look up the global scope as a fallback
+
+        $name = $name_node->children['name'];
+        if (array_key_exists(strtolower($name), $this->defined_functions)) {
+            return $this->defined_functions[strtolower($name)];
+        }
+        if (function_exists($name)) {
+            return new \ReflectionFunction($name);
+        }
+        return null;
     }
 
     function class_exists(string $name)
@@ -109,6 +164,21 @@ class ASTContext
     function function_exists(string $name)
     {
         return array_key_exists(strtolower($name), $this->defined_functions) || function_exists($name);
+    }
+
+    function fq_name(\ast\Node $name_node): string
+    {
+        if ($name_node->flags === \ast\flags\NAME_FQ) {
+            return $name_node->children['name'];
+        }
+        $split = explode('\\', $name_node->children['name'], 2);
+        if (array_key_exists(strtolower($split[0]), $this->use_aliases)) {
+            $split[0] = $this->use_aliases[strtolower($split[0])];
+        }
+        else {
+            $split[0] = $this->namespace . $split[0];
+        }
+        return implode('\\', $split);
     }
 
     function fq_class_name(\ast\Node $name_node, bool $print_error=true): ?string
@@ -148,11 +218,7 @@ class ASTContext
             }
             return $parent->getName();
         }
-        if ($name_node->flags === \ast\flags\NAME_FQ) {
-            return $name_node->children['name'];
-        }
-        return $this->use_aliases[$name_node->children['name']] ??
-               $this->namespace . $name_node->children['name'];
+        return $this->fq_name($name_node);
     }
 
     function reflection_type_from_ast(?\ast\Node $node, bool $has_default_null=false):
@@ -196,7 +262,7 @@ class ASTContext
             else {
                 $alias = $use_elem->children['alias'];
             }
-            $this->use_aliases[$alias] = $use_elem->children['name'];
+            $this->use_aliases[strtolower($alias)] = $use_elem->children['name'];
         }
     }
 
@@ -254,6 +320,7 @@ function get_primitive_type(mixed $x): ?string
     if ($x === false) return 'false';
     if ($x === true) return 'true';
     if (is_int($x)) return 'int';
+    if (is_array($x)) return 'array';
     if (is_float($x)) return 'float';
     if (is_string($x)) return 'string';
     if (!($x instanceof \ast\Node)) {
@@ -428,12 +495,7 @@ function get_possible_types(ASTContext $ctx, mixed $node, bool $print_error=fals
         return [null];
     }
     if ($node->kind === \ast\AST_CONST) {
-        $const = $node->children['name']->children['name'];
-        $const_lower = strtolower($const);
-        if (!$ctx->defined($const)) {
-            return [null];
-        }
-        return [$ctx->get_constant_type($const)];
+        return [$ctx->get_constant_type($node->children['name'])];
     }
     if ($node->kind === \ast\AST_METHOD_CALL || $node->kind === \ast\AST_STATIC_CALL) {
         if ($node->children['args']->kind === \ast\AST_CALLABLE_CONVERT) {
@@ -450,11 +512,7 @@ function get_possible_types(ASTContext $ctx, mixed $node, bool $print_error=fals
             return ['Closure'];
         }
         if ($node->children['expr']->kind === \ast\AST_NAME) {
-            $function = $node->children['expr']->children['name'];
-            if (!$ctx->function_exists($function)) {
-                return [null];
-            }
-            return [$ctx->get_function($function)->getReturnType()];
+            return [$ctx->get_function($node->children['expr'])?->getReturnType()];
         }
     }
     if ($node->kind === \ast\AST_NEW) {
@@ -1649,17 +1707,11 @@ function find_defined_variables(ASTContext $ctx, \ast\Node $node): void
             goto end;
         }
         if ($node->kind === \ast\AST_CALL) {
-            $function = null;
             if ($node->children['expr']->kind === \ast\AST_NAME) {
-                $function_name = $node->children['expr']->children['name'];
-                if ($node->children['expr']->flags !== \ast\flags\NAME_FQ &&
-                    $ctx->function_exists($ctx->namespace . $function_name))
-                {
-                    $function_name = $ctx->namespace . $function_name;
-                }
-                if ($ctx->function_exists($function_name)) {
-                    $function = $ctx->get_function($function_name);
-                }
+                $function = $ctx->get_function($node->children['expr']);
+            }
+            else {
+                $function = null;
             }
         }
         else {
@@ -1900,31 +1952,16 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
         validate_arguments($ctx, $constructor, $node->children['args']);
     }
     else if ($node->kind === \ast\AST_CONST) {
-
-        # There is a fallback to the global namespace for functions and constants, but not for
-        # classes.
-
-        $c = $node->children['name']->children['name'];
-        if (!$ctx->defined($c) &&
-            ($node->children['name']->flags === \ast\flags\NAME_FQ || !$ctx->defined($ctx->namespace . $c)))
-        {
-            $ctx->error("Undefined constant `$c`", $node);
+        if (!$ctx->constant_exists_with_fallback($node->children['name'])) {
+            $ctx->error("Undefined constant `{$node->children['name']->children['name']}`", $node);
         }
     }
     else if ($node->kind === \ast\AST_CALL) {
         $function = null;
         if ($node->children['expr']->kind === \ast\AST_NAME) {
-            $function_name = $node->children['expr']->children['name'];
-            if ($node->children['expr']->flags !== \ast\flags\NAME_FQ &&
-                $ctx->function_exists($ctx->namespace . $function_name))
-            {
-                $function_name = $ctx->namespace . $function_name;
-            }
-            if ($ctx->function_exists($function_name)) {
-                $function = $ctx->get_function($function_name);
-            }
-            else {
-                $ctx->error("Undefined function `$function_name`", $node);
+            $function = $ctx->get_function($node->children['expr']);
+            if ($function === null) {
+                $ctx->error("Undefined function `{$node->children['expr']->children['name']}`", $node);
             }
         }
         validate_arguments($ctx, $function, $node->children['args']);
@@ -1985,9 +2022,9 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
             }
         }
         else {
-            $function_name = $node->children['name'][0] === '\\' ?
-                $node->children['name'] : $ctx2->namespace . $node->children['name'];
-            $ctx2->function = $ctx2->get_function($function_name);
+            // Names of function declarations are never fully qualified
+            $function_name = $ctx2->namespace . $node->children['name'];
+            $ctx2->function = $ctx2->defined_functions[strtolower($function_name)];
         }
 
         foreach ($ctx2->function->getParameters() as $p) {
@@ -2088,8 +2125,14 @@ function traverse_classes_functions(ASTContext $ctx, \ast\Node $node): void
         }
         else if ($child->kind === \ast\AST_CONST_DECL) {
             foreach ($child->children as $const) {
-                $name = $ctx->namespace . $const->children['name'];
-                if ($ctx->defined($name) && !$ctx->make_self_check) {
+                if (in_array(strtolower($const->children['name']), ['null', 'false', 'true'])) {
+                    $ctx->error("Redeclaration of constant `{$const->children['name']}`", $const);
+                    continue;
+                }
+                $name = strtolower($ctx->namespace) . $const->children['name'];
+                if ((array_key_exists($name, $ctx->defined_constants) || defined($name)) &&
+                    !$ctx->make_self_check)
+                {
                     $ctx->error("Redeclaration of constant `$name`", $const);
                     continue;
                 }
