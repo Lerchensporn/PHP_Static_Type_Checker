@@ -522,7 +522,14 @@ function get_possible_types(ASTContext $ctx, mixed $node, bool $print_error=fals
         if ($node->children['class']->kind !== \ast\AST_NAME) {
             return [null];
         }
-        return [$ctx->fq_class_name($node->children['class'], $print_error)];
+        $class_name = $ctx->fq_class_name($node->children['class'], $print_error);
+        if (!$ctx->class_exists($class_name)) {
+            if ($print_error) {
+                $ctx->error("Undefined class `$class_name`", $node->children['class']);
+            }
+            return [];
+        }
+        return [$class_name];
     }
     if ($node->kind === \ast\AST_VAR) {
         if ($node->children['name'] instanceof \ast\Node) {
@@ -689,6 +696,12 @@ function get_possible_methods(ASTContext $ctx, \ast\Node $node, bool $print_erro
         $is_static_call = true;
         if ($node->children['class']->kind === \ast\AST_NAME) { # Example: `Klasse::method()`
             $possible_types = [$ctx->fq_class_name($node->children['class'])];
+            if (!$ctx->class_exists($possible_types[0])) {
+                if ($print_error) {
+                    $ctx->error("Undefined class `$possible_types[0]`", $node);
+                }
+                $possible_types = [];
+            }
         }
         else { # Example: `$variable::method()`
             $possible_types = get_possible_types($ctx, $node->children['class']);
@@ -720,12 +733,6 @@ function get_possible_methods(ASTContext $ctx, \ast\Node $node, bool $print_erro
                 continue;
             }
             $class = $ctx->get_class($type_name);
-            if ($class === null) {
-                if ($print_error) {
-                    $ctx->error("Undefined class `$type_name`", $node);
-                }
-                return null;
-            }
             if ($is_static_call && $class->hasMethod('__callStatic') ||
                 !$is_static_call && $class->hasMethod('__call'))
             {
@@ -856,7 +863,7 @@ class AST_ReflectionNamedType extends \ReflectionNamedType
                 throw new \TypeError;
             }
             $this->type_name = $type_name;
-            if (!$ctx->class_exists($this->type_name) && !interface_exists($this->type_name)) {
+            if (!$ctx->class_exists($this->type_name) && !$ctx->interface_exists($this->type_name)) {
                 $ctx->error("Undefined type `{$this->type_name}` in type hint", $node);
             }
         }
@@ -1653,7 +1660,7 @@ function find_defined_variables(ASTContext $ctx, \ast\Node $node): void
         $possible_types = [];
         foreach ($node->children['class']->children as $class_node) {
             $class = $ctx->fq_class_name($class_node);
-            if ($ctx->class_exists($class) && !interface_exists($class)) {
+            if ($ctx->class_exists($class) && !$ctx->interface_exists($class)) {
                 $possible_types []= $class;
             }
         }
@@ -1888,7 +1895,7 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
         $possible_types = [];
         foreach ($node->children['class']->children as $class_node) {
             $class = $ctx->fq_class_name($class_node);
-            if (!$ctx->class_exists($class) && !interface_exists($class)) {
+            if (!$ctx->class_exists($class) && !$ctx->interface_exists($class)) {
                 $ctx->error("Undefined class `$class`", $node->children['class']);
                 continue;
             }
@@ -1925,15 +1932,11 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
     }
     else if ($node->kind === \ast\AST_NEW) {
         $types = get_possible_types($ctx, $node, true);
-        if (count($types) > 1 || $types[0] === null) {
+        if (count($types) !== 1 || $types[0] === null) {
             validate_arguments($ctx, null, $node->children['args']);
             return $ctx;
         }
         $class = $ctx->get_class($types[0]);
-        if ($class === null) {
-            $ctx->error("Undefined class `{$types[0]}`", $node);
-            return $ctx;
-        }
         if ($class->isAbstract()) {
             $ctx->error("Cannot instantiate abstract class `{$class->getName()}`", $node);
             return $ctx;
