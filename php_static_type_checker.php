@@ -335,6 +335,9 @@ function get_primitive_type(mixed $x): ?string
 
 function type_has_supertype(ASTContext $ctx, array $types, array $supertypes): bool
 {
+    if (count($types) === 0 || count($supertypes) === 0) {
+        return true;
+    }
     foreach ($types as $type) {
         if ($type === null) {
             return true;
@@ -652,9 +655,6 @@ function validate_arguments(ASTContext $ctx, ?\ReflectionFunctionAbstract $funct
             continue;
         }
         $arg_types = get_possible_types($ctx, $arg);
-        if ($arg_types === []) {
-            continue;
-        }
         if (!type_has_supertype($ctx, $arg_types, [$parameter_type])) {
             $arg_types_str = type_to_string($arg_types);
             $parameter_types_str = type_to_string([$parameter_type]);
@@ -1836,9 +1836,6 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
         }
         else {
             $returned_type = get_possible_types($ctx, $node->children['expr']);
-            if (count($returned_type) === 0) {
-                return $ctx;
-            }
         }
         if (!type_has_supertype($ctx, $returned_type, [$return_type_hint])) {
             $returned_type_str = type_to_string($returned_type);
@@ -1878,9 +1875,6 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
         validate_ast_children($ctx, $node->children['var']);
         $ctx->is_in_assignment = false;
         $possible_types = get_possible_types($ctx, $node->children['var'], false, true);
-        if ($possible_types === []) {
-            return null;
-        }
         $expr_types = get_possible_types($ctx, $node->children['expr']);
         if (!type_has_supertype($ctx, $expr_types, $possible_types)) {
             $possible_types_str = type_to_string($possible_types);
