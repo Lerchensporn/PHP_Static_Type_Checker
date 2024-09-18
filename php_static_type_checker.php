@@ -603,59 +603,52 @@ function get_possible_types(ASTContext $ctx, mixed $node, bool $print_error=fals
     return [null];
 }
 
-function validate_arguments(ASTContext $ctx, ?\ReflectionFunctionAbstract $function, \ast\Node $node): void
+function validate_arguments(ASTContext $ctx, \ReflectionFunctionAbstract $function, \ast\Node $node): void
 {
     if ($node->kind === \ast\AST_CALLABLE_CONVERT) {
         return;
     }
+    $unspecified_parameters = $function->getParameters();
     foreach ($node->children as $index => $arg) {
         if ($arg instanceof \ast\Node && $arg->kind === \ast\AST_UNPACK) {
             return;
         }
-        $arg_types = null;
-        $parameter = null;
+
         if ($arg instanceof \ast\Node && $arg->kind === \ast\AST_NAMED_ARG) {
-            if ($arg->children['expr'] instanceof \ast\Node &&
-                $arg->children['expr']->kind === \ast\AST_VAR)
-            {
-                $var = $arg->children['expr']->children['name'];
-                $arg_types = $ctx->defined_variables[$var]->possible_types ?? null;
-            }
-            if ($function !== null) {
-                $arg_name = $arg->children['name'];
-                foreach ($function->getParameters() as $p) {
-                    if ($p->getName() === $arg_name) {
-                        $parameter = $p;
-                    }
-                }
-                if ($parameter === null && !$function->isVariadic()) {
-                    $ctx->error("Invalid argument name `$arg_name`", $arg);
-                    continue;
-                }
-            }
-        }
-        else if ($function !== null) {
-            if ($index >= count($function->getParameters())) {
-                if (!$function->isVariadic()) {
-                    $ctx->error("Too many arguments for function `{$function->getName()}`", $node);
+            $parameter = null;
+            foreach ($unspecified_parameters as $i => $p) {
+                if ($p->getName() === $arg->children['name']) {
+                    $parameter = $p;
+                    unset($unspecified_parameters[$i]);
                     break;
                 }
-                $parameter = null;
             }
-            else {
-                $parameter = $function->getParameters()[$index];
+            if ($parameter === null) {
+                if (!$function->isVariadic()) {
+                    $ctx->error("Invalid argument name `{$arg->children['name']}`", $arg);
+                }
+                continue;
             }
         }
-        if ($parameter?->isPassedByReference() && (!($arg instanceof \ast\Node) ||
+        else if ($index >= count($function->getParameters())) {
+            if (!$function->isVariadic()) {
+                $ctx->error("Too many arguments for function `{$function->getName()}`", $node);
+                break;
+            }
+            continue;
+        }
+        else {
+            $parameter = $unspecified_parameters[$index];
+            unset($unspecified_parameters[$index]);
+        }
+
+        if ($parameter->isPassedByReference() && (!($arg instanceof \ast\Node) ||
             !in_array($arg->kind, [\ast\AST_VAR, \ast\AST_PROP, \ast\AST_DIM])))
         {
             $index += 1;
             $ctx->error("In the call to `{$function->getName()}`, the expression in argument $index " .
                 "cannot be passed by reference", $node);
             return;
-        }
-        if ($parameter === null) {
-            continue;
         }
         $parameter_type = $parameter->getType();
         if ($parameter_type === null) {
@@ -670,17 +663,11 @@ function validate_arguments(ASTContext $ctx, ?\ReflectionFunctionAbstract $funct
                 "is not compatible with parameter type `$parameter_types_str`", $node);
         }
     }
-    if ($function === null) {
-        return;
-    }
-    $num_required_parameters = 0;
-    foreach ($function->getParameters() as $parameter) {
-        if (!$parameter->isOptional()) {
-            $num_required_parameters += 1;
+    foreach ($unspecified_parameters as $p) {
+        if (!$p->isOptional()) {
+            $ctx->error("The call to `{$function->getName()}` lacks the required " .
+                "argument `{$p->getName()}`", $node);
         }
-    }
-    if (count($node->children) < $num_required_parameters) {
-        $ctx->error("Too few arguments provided to function `{$function->getName()}`", $node);
     }
 }
 
@@ -1912,7 +1899,6 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
             $ctx->error("Undefined method `{$node->children['method']}`", $node);
         }
         if ($possible_methods === null || count($possible_methods) !== 1) {
-            validate_arguments($ctx, null, $node->children['args']);
             return $ctx;
         }
         if ($node->kind === \ast\AST_STATIC_CALL) {
@@ -1933,7 +1919,6 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
     else if ($node->kind === \ast\AST_NEW) {
         $types = get_possible_types($ctx, $node, true);
         if (count($types) !== 1 || $types[0] === null) {
-            validate_arguments($ctx, null, $node->children['args']);
             return $ctx;
         }
         $class = $ctx->get_class($types[0]);
@@ -1942,11 +1927,12 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
             return $ctx;
         }
         $constructor = $class->getConstructor();
-        if ($constructor === null && count($node->children['args']->children) > 0) {
-            $ctx->error("The constructor of class `{$class->getName()}` does not accept arguments", $node);
-            return $ctx;
+        if ($constructor !== null) {
+            validate_arguments($ctx, $constructor, $node->children['args']);
         }
-        validate_arguments($ctx, $constructor, $node->children['args']);
+        else if (count($node->children['args']->children) > 0) {
+            $ctx->error("The constructor of class `{$class->getName()}` does not accept arguments", $node);
+        }
     }
     else if ($node->kind === \ast\AST_CONST) {
         if (!$ctx->constant_exists_with_fallback($node->children['name'])) {
@@ -1954,12 +1940,13 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
         }
     }
     else if ($node->kind === \ast\AST_CALL) {
-        $function = null;
-        if ($node->children['expr']->kind === \ast\AST_NAME) {
-            $function = $ctx->get_function($node->children['expr']);
-            if ($function === null) {
-                $ctx->error("Undefined function `{$node->children['expr']->children['name']}`", $node);
-            }
+        if ($node->children['expr']->kind !== \ast\AST_NAME) {
+            return $ctx;
+        }
+        $function = $ctx->get_function($node->children['expr']);
+        if ($function === null) {
+            $ctx->error("Undefined function `{$node->children['expr']->children['name']}`", $node);
+            return $ctx;
         }
         validate_arguments($ctx, $function, $node->children['args']);
     }
