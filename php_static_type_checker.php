@@ -2000,9 +2000,6 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
         $ctx2->has_return = false;
         $ctx2->reset_defined_variables();
 
-        if ($node->kind !== \ast\AST_METHOD) {
-            $ctx2->class = null;
-        }
         if ($node->kind === \ast\AST_CLOSURE) {
             if (array_key_exists('this', $ctx->defined_variables)) {
                 $ctx2->defined_variables['this'] = $ctx->defined_variables['this'];
