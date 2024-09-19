@@ -279,6 +279,20 @@ class ASTContext
         print("`{$this->get_relative_file_name()}` line \e[1m{$node->lineno}\e[0m:\n$message\n");
         $this->has_error = true;
     }
+
+    function has_access(string $type_name, int $modifiers): bool
+    {
+        if (($modifiers & \ast\flags\MODIFIER_PRIVATE) && $type_name !== $this->class?->getName()) {
+            return false;
+        }
+        if (($modifiers & \ast\flags\MODIFIER_PROTECTED) &&
+            $type_name !== $this->class?->getName() && ($this->class?->getParentClass() === false ||
+            $type_name !== $this->class?->getParentClass()->getName()))
+        {
+            return false;
+        }
+        return true;
+    }
 }
 
 function type_to_string(array $types, bool $sort=false): string
@@ -482,6 +496,9 @@ function get_possible_types(ASTContext $ctx, mixed $node, bool $print_error=fals
             if ($const_or_prop === false) {
                 continue;
             }
+            if (!$ctx->has_access($possible_class, $const_or_prop->getModifiers())) {
+                continue;
+            }
             $possible_types []= $const_or_prop->getType();
         }
         if (count($possible_types) > 0) {
@@ -489,10 +506,10 @@ function get_possible_types(ASTContext $ctx, mixed $node, bool $print_error=fals
         }
         if ($print_error) {
             if ($node->kind === \ast\AST_CLASS_CONST) {
-                $ctx->error("Undefined class constant `{$node->children['const']}`", $node);
+                $ctx->error("Class constant `{$node->children['const']}` is undefined or inaccessible", $node);
             }
             else {
-                $ctx->error("Undefined class property `{$node->children['prop']}`", $node);
+                $ctx->error("Class property `{$node->children['prop']}` is undefined or inaccessible", $node);
             }
         }
         return [null];
@@ -525,7 +542,7 @@ function get_possible_types(ASTContext $ctx, mixed $node, bool $print_error=fals
         $class_name = $ctx->fq_class_name($node->children['class'], $print_error);
         if (!$ctx->class_exists($class_name)) {
             if ($print_error) {
-                $ctx->error("Undefined class `$class_name`", $node->children['class']);
+                $ctx->error("Class `$class_name` is undefined", $node->children['class']);
             }
             return [];
         }
@@ -567,11 +584,6 @@ function get_possible_types(ASTContext $ctx, mixed $node, bool $print_error=fals
                     continue;
                 }
                 $class = $ctx->get_class($type_name);
-                if ($class === null) {
-                    # Returning null to avoid error messages about properties when we already
-                    # have one about the incorrect class name.
-                    return [null];
-                }
                 if (!$is_in_assignment && $class->hasMethod('__get') ||
                     $is_in_assignment && $class->hasMethod('__set'))
                 {
@@ -581,11 +593,11 @@ function get_possible_types(ASTContext $ctx, mixed $node, bool $print_error=fals
                     continue;
                 }
                 $prop = $class->getProperty($node->children['prop']);
+                if (!$ctx->has_access($type_name, $prop->getModifiers())) {
+                    continue;
+                }
                 if ($prop->getModifiers() & \ast\flags\MODIFIER_STATIC) {
-                    if ($print_error) {
-                        $ctx->error("Non-static access to static property `{$prop->getName()}`", $node);
-                    }
-                    return [null];
+                    continue;
                 }
                 $possible_types []= $prop->getType();
             }
@@ -593,8 +605,8 @@ function get_possible_types(ASTContext $ctx, mixed $node, bool $print_error=fals
         if (count($possible_types) === 0) {
             $possible_expr_types_str = type_to_string($possible_expr_types);
             if ($print_error) {
-                $ctx->error("Variable of type `$possible_expr_types_str` does not have property " .
-                    "`{$node->children['prop']}`", $node);
+                $ctx->error("Property `{$node->children['prop']}` of variable of type " .
+                    "`$possible_expr_types_str` is undefined or inaccessible", $node);
             }
             return [null];
         }
@@ -685,7 +697,7 @@ function get_possible_methods(ASTContext $ctx, \ast\Node $node, bool $print_erro
             $possible_types = [$ctx->fq_class_name($node->children['class'])];
             if (!$ctx->class_exists($possible_types[0])) {
                 if ($print_error) {
-                    $ctx->error("Undefined class `$possible_types[0]`", $node);
+                    $ctx->error("Class `$possible_types[0]` is undefined", $node);
                 }
                 $possible_types = [];
             }
@@ -725,9 +737,14 @@ function get_possible_methods(ASTContext $ctx, \ast\Node $node, bool $print_erro
             {
                 return null;
             }
-            if ($class->hasMethod($node->children['method'])) {
-                $possible_methods []= $class->getMethod($node->children['method']);
+            if (!$class->hasMethod($node->children['method'])) {
+                continue;
             }
+            $method = $class->getMethod($node->children['method']);
+            if (!$ctx->has_access($type_name, $method->getModifiers())) {
+                continue;
+            }
+            $possible_methods []= $method;
         }
     }
     return $possible_methods;
@@ -851,7 +868,7 @@ class AST_ReflectionNamedType extends \ReflectionNamedType
             }
             $this->type_name = $type_name;
             if (!$ctx->class_exists($this->type_name) && !$ctx->interface_exists($this->type_name)) {
-                $ctx->error("Undefined type `{$this->type_name}` in type hint", $node);
+                $ctx->error("Type `{$this->type_name}` in the type hint is undefined", $node);
             }
         }
         $this->allows_null =
@@ -1337,7 +1354,7 @@ class AST_ReflectionClass extends \ReflectionClass
             $interface_name = $this->ctx->fq_class_name($interface);
             $class = $this->ctx->get_class($interface_name);
             if ($class === null) {
-                $this->ctx->error("Undefined interface `$interface_name`", $interface);
+                $this->ctx->error("Interface `$interface_name` is undefined", $interface);
                 continue;
             }
             if ($class instanceof AST_ReflectionClass) {
@@ -1438,7 +1455,7 @@ class AST_ReflectionClass extends \ReflectionClass
                 $class_name = $adaptation->children['method']->children['class']->children['name'];
                 $class = $this->ctx->get_class($class_name);
                 if ($class === null) {
-                    $this->ctx->error("Undefined trait `$class_name`", $adaptation);
+                    $this->ctx->error("Trait `$class_name` is undefined", $adaptation);
                     continue;
                 }
                 $method = $adaptation->children['method']->children['method'];
@@ -1448,7 +1465,7 @@ class AST_ReflectionClass extends \ReflectionClass
                 foreach ($adaptation->children['insteadof']->children as $insteadof) {
                     $insteadof_name = $insteadof->children['name'];
                     if (!$this->ctx->get_class($insteadof_name)?->isTrait()) {
-                        $this->ctx->error("Undefined trait `$insteadof_name`", $insteadof);
+                        $this->ctx->error("Trait `$insteadof_name` is undefined", $insteadof);
                     }
                 }
                 $ignored_trait_methods[$insteadof_name] []= $method;
@@ -1596,6 +1613,11 @@ class AST_ReflectionClass extends \ReflectionClass
     {
         return array_values($this->methods);
     }
+
+    function getModifiers(): int
+    {
+        return $this->node->flags;
+    }
 }
 
 function add_variables_in_node(ASTContext $ctx, \ast\Node $node): void
@@ -1632,7 +1654,7 @@ function find_defined_variables(ASTContext $ctx, \ast\Node $node): void
         }
         $class_name = $ctx->fq_class_name($node->children['class']);
         if ($ctx->get_class($class_name) === null) {
-            $ctx->error("Undefined class $class_name", $node);
+            $ctx->error("Class $class_name is undefined", $node);
             goto end;
         }
         $var = $node->children['expr']->children['name'];
@@ -1883,7 +1905,7 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
         foreach ($node->children['class']->children as $class_node) {
             $class = $ctx->fq_class_name($class_node);
             if (!$ctx->class_exists($class) && !$ctx->interface_exists($class)) {
-                $ctx->error("Undefined class `$class`", $node->children['class']);
+                $ctx->error("Class `$class` is undefined", $node->children['class']);
                 continue;
             }
             $possible_types []= $class;
@@ -1896,7 +1918,7 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
     else if ($node->kind === \ast\AST_METHOD_CALL || $node->kind === \ast\AST_STATIC_CALL) {
         $possible_methods = get_possible_methods($ctx, $node, true);
         if ($possible_methods === []) {
-            $ctx->error("Undefined method `{$node->children['method']}`", $node);
+            $ctx->error("Method `{$node->children['method']}` is undefined or inaccessible", $node);
         }
         if ($possible_methods === null || count($possible_methods) !== 1) {
             return $ctx;
@@ -1936,7 +1958,7 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
     }
     else if ($node->kind === \ast\AST_CONST) {
         if (!$ctx->constant_exists_with_fallback($node->children['name'])) {
-            $ctx->error("Undefined constant `{$node->children['name']->children['name']}`", $node);
+            $ctx->error("Constant `{$node->children['name']->children['name']}` is undefined", $node);
         }
     }
     else if ($node->kind === \ast\AST_CALL) {
@@ -1945,7 +1967,7 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
         }
         $function = $ctx->get_function($node->children['expr']);
         if ($function === null) {
-            $ctx->error("Undefined function `{$node->children['expr']->children['name']}`", $node);
+            $ctx->error("Function `{$node->children['expr']->children['name']}` is undefined", $node);
             return $ctx;
         }
         validate_arguments($ctx, $function, $node->children['args']);
@@ -1953,7 +1975,7 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
     else if ($node->kind === \ast\AST_VAR) {
         $var = $node->children['name'];
         if (!($var instanceof \ast\Node) && !array_key_exists($var, $ctx->defined_variables)) {
-            $ctx->error("Undefined variable `$$var`", $node);
+            $ctx->error("Variable `$$var` is undefined", $node);
         }
     }
     else if ($node->kind === \ast\AST_NAMESPACE) {
@@ -1993,7 +2015,7 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
                 }
                 $ctx2->add_defined_variable($var, [null]);
                 if ($use->flags !== \ast\flags\CLOSURE_USE_REF) {
-                    $ctx->error("Undefined closure variable `$var`", $node);
+                    $ctx->error("Closure variable `$var` is undefined", $node);
                 }
             }
             $ctx2->function = new AST_ReflectionFunction($ctx2, $node);
