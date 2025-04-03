@@ -637,7 +637,7 @@ function validate_arguments(ASTContext $ctx, \ReflectionFunctionAbstract $functi
             }
             if ($parameter === null) {
                 if (!$function->isVariadic()) {
-                    $ctx->error("Invalid argument name `{$arg->children['name']}`", $arg);
+                    $ctx->error("Invalid or duplicate named argument `{$arg->children['name']}`", $arg);
                 }
                 continue;
             }
@@ -732,6 +732,9 @@ function get_possible_methods(ASTContext $ctx, \ast\Node $node, bool $print_erro
                 continue;
             }
             $class = $ctx->get_class($type_name);
+            if ($class === null) {
+                return null;
+            }
             if ($is_static_call && $class->hasMethod('__callStatic') ||
                 !$is_static_call && $class->hasMethod('__call'))
             {
