@@ -1,4 +1,4 @@
-# PHP static type checker
+# PHP Static Type Checker
 
 This is a fast and simple static code analyzer for PHP. It depends on the `php-ast` PECL extension.
 It resolves included files automatically and uses reflection to support any PECL extensions without
