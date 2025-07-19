@@ -584,6 +584,9 @@ function get_possible_types(ASTContext $ctx, mixed $node, bool $print_error=fals
                     continue;
                 }
                 $class = $ctx->get_class($type_name);
+                if ($class === null) {
+                    return [null];
+                }
                 if (!$is_in_assignment && $class->hasMethod('__get') ||
                     $is_in_assignment && $class->hasMethod('__set'))
                 {
@@ -1657,7 +1660,7 @@ function find_defined_variables(ASTContext $ctx, \ast\Node $node): void
         }
         $class_name = $ctx->fq_class_name($node->children['class']);
         if ($ctx->get_class($class_name) === null) {
-            $ctx->error("Class $class_name is undefined", $node);
+            $ctx->error("Class `$class_name` is undefined", $node);
             goto end;
         }
         $var = $node->children['expr']->children['name'];
@@ -2028,7 +2031,7 @@ function validate_ast_node(ASTContext $ctx, \ast\Node $node): ?ASTContext
             }
         }
         else {
-            // Names of function declarations are never fully qualified
+            # Names of function declarations are never fully qualified
             $function_name = $ctx2->namespace . $node->children['name'];
             $ctx2->function = $ctx2->defined_functions[strtolower($function_name)];
         }
@@ -2295,7 +2298,6 @@ function main(array $argv): int
         print("Checked files:$checked_files\n");
         print("Ignored files:$ignored_files\n");
     }
-
     return $ctx->has_error ? 1 : 0;
 }
 
